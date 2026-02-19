@@ -5,9 +5,11 @@
     - If this gives an error, run: sudo apt update sudo apt install -y python3 python3-venv python3-pip
 - git --version
 
+## run these in ~/CptS440-PokemonAI/showdownAIproject$
 - python3 -m venv .venv
 - source .venv/bin/activate 
 
+## run these in (.venv) 
 - python -m pip install --upgrade pip wheel setuptools
 - `pip install -e .` 
 
@@ -70,6 +72,33 @@
 
 - Decision Engine:
     - src/psa/decision/
-    
+
 - Overlay and Packaging:
    - src/psa/app/
+
+
+## CURRENT FILE STRUCTURE EXPLANATION:
+What we currently have:
+
+![alt text](www/filePathPreview.png)
+
+First, domain/. This is just where we ask "what is the current game state" and output the answer. to other sections that use that outputed data for calculations.
+
+Mechanics/ is the folder where we decide "what happens if we do x move". If we use the prexisting engine, we use api.py to do it.
+
+Decision/ is "given current state, what move do we pick". Initially, we use heuristic.py and search.py to do the ruleset based decision making, then later use the data from training/ in decision.py to make the more complex predictions on moves. 
+
+Training/ is where we actually "teach" the policy value network with the output logs we got from the baseline heuristic 1v1's. This is where the actual machine learning happens.
+
+In app/, we create the actual UI and such later. for now just has main, which we use a dummy client to test things like making a false state and calling choose_action(state) and seeing what we get. 
+
+So our "pipeline" is as such:
+
+1. Integration gets browser data and builds a State object 
+2. Decision chooser.py is called with the created State
+3. chooser.py uses:
+    - mechanics/api.py to determine actual damage/results of each indiviual move IN THAT STATE
+    - either the heuristic ruleset or priority value to determine possible moves
+    - search.py to look ahead for possible move outcomes, finding best "move trees"
+4. chooser.py returns the top moves and their "scores"
+5. UI displays the results as a neat little overlay!
