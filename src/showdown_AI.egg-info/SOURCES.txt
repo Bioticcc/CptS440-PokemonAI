@@ -1,0 +1,9 @@
+README.md
+pyproject.toml
+src/psai/__init__.py
+src/showdown_AI.egg-info/PKG-INFO
+src/showdown_AI.egg-info/SOURCES.txt
+src/showdown_AI.egg-info/dependency_links.txt
+src/showdown_AI.egg-info/entry_points.txt
+src/showdown_AI.egg-info/requires.txt
+src/showdown_AI.egg-info/top_level.txt

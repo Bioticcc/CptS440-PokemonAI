@@ -1,0 +1,36 @@
+Metadata-Version: 2.4
+Name: showdown-AI
+Version: 0.1.0
+Summary: Pokemon Showdown AI overlay: mechanics + decision engine + policy/value model
+Author: CptS-440 Team
+License: MIT
+Classifier: Programming Language :: Python :: 3
+Classifier: Operating System :: POSIX :: Linux
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.24
+Provides-Extra: dev
+Requires-Dist: pytest>=7.4; extra == "dev"
+Requires-Dist: ruff>=0.5; extra == "dev"
+Requires-Dist: mypy>=1.8; extra == "dev"
+
+# Alright, first and foremost we need to confirm weve got the required installs ready:
+
+## Run the following in your VS code bash terminal:
+- python3 --version
+    - If this gives an error, run: sudo apt update sudo apt install -y python3 python3-venv python3-pip
+- git --version
+
+- python3 -m venv .venv
+- source .venv/bin/activate 
+
+- python -m pip install --upgrade pip wheel setuptools
+- pip install -e . 
+
+
+## ROLES;
+- Overlay/Art. This will be primarily ensuring the project can be downloaded as an application, and when ran will accept a link/token (unsure of actual term) that will feed in the live battle data. This will be how we connect our model and its UI to the browser game. UI should LOOK like a broswer overlay, maybe like a cute lil pokedex talking to you or smthin
+
+- Heuristic rule set - this will be assigning positive or negative values to moves, typing, etc. This is sort of the hard list of rules that will be used to run the 1v1's, that will then later generate the data we train the main model with
+
+- Mechanics engine - This maybe going to just be using that github repo mentioned in the proposal and connecting it with our rule set? still confused how it works. 
