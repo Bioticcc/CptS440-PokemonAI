@@ -1,0 +1,16 @@
+"""Stable mechanics API for deterministic battle facts.
+
+This module should expose battle-math queries such as:
+- damage estimation
+- KO probability
+- move order / priority resolution
+- optional resulting-state projections for search
+
+This layer computes factual outcomes only. Strategy and move selection belong
+in the decision package, not in mechanics.
+"""
+
+# Plain-English summary:
+# This file should answer questions like "how much damage happens?" or
+# "who moves first?" It provides battle facts that decision code can use.
+# It should never decide which move to pick.

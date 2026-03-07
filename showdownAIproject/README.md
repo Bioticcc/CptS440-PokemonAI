@@ -15,10 +15,11 @@
 
 ## SPECIFIC ROLES (choose one of these you want for now)
 - Showdown Integration and State Parser
-    - What you need to do here is get the data from the showdown browser with poke-env, and have a State object class that is updated every turn. State will have parameters like HP%, status, boosts, types, moves (for the enemy pokemon, only the ones that we have seen so far), item/ability if we know it.
+    - What you need to do here is connect to showdown through poke-env (the agent itself is the actual showdown player/client), receive the live battle object each turn, and have a State object class that is updated every turn. State will have parameters like HP%, status, boosts, types, moves (for the enemy pokemon, only the ones that we have seen so far), item/ability if we know it.
     - We should have a State for friendlyPokemon and enemyPokemon, and this will update with each turn. 
     - track the different pokemon we have seen so far. Save a list of the existing pokemon in that battle.
-    - DONE IF: given a live showdown battle, we can output a "state" showing the above information for each turn. 
+    - Coordinate with app/UI so the human-confirmed move can be passed back through poke-env to showdown each turn.
+    - DONE IF: given a live showdown battle through poke-env, we can output a "state" showing the above information for each turn, and pass the confirmed move back through poke-env. 
 
 - Mechanics Engine
     - This is the math engine essentially, that determines exactly what will happen if the selected move/choice is made. 
@@ -50,10 +51,10 @@
     DONE IF: outputs a more structured output of the top 3 moves, and why. (MATHEMATICALLY, rather then as an LLM. I dont think we need that, but hey if someone wants to make this have an LLM included feel free as long as youre sure it would mess with things. )
 
 - Overlay and Packaging
-    - This is what turns all this other stuff into an actual downloadable application. needs art, needs to display the moves in a nice clean UI. Final step, but I think you can build on it from the getgo, just keeping in mind future needs. 
+    - This is what turns all this other stuff into an actual downloadable application. needs art, needs to display the top moves and reasoning in a nice clean local UI/control panel for the poke-env controlled battle. Final step, but I think you can build on it from the getgo, just keeping in mind future needs. 
     - Needs proper packaging, so maybe something like Electron or Tauri. 
-    - VERY IMPORTANT THAT WHOEVERS DOING THIS COORDINATES WITH THE INPUTS ROLE. The UI overlay and the showdown integration have to work together.
-    - DONE IF: We can open a showdown 1v1, open the overlay, and get suggestions on the top 3 or so moves to play. 
+    - VERY IMPORTANT THAT WHOEVERS DOING THIS COORDINATES WITH THE INPUTS ROLE. The UI/control panel and the showdown integration have to work together.
+    - DONE IF: We can run a showdown 1v1 through poke-env, open the control panel, get top 3 move suggestions with reasons, confirm a move, and have that move sent to showdown. 
 
 
 ## PRIMARY FILES TO WORK IN: 
@@ -82,7 +83,7 @@ What we currently have:
 
 ![alt text](www/filePathPreview.png)
 
-First, domain/. This is just where we ask "what is the current game state" and output the answer. to other sections that use that outputed data for calculations.
+First, domain/. This is just where we ask "what is the current game state" and output the answer. Here, State Parser converts the live poke-env battle object into our internal State for other sections that use that outputed data for calculations.
 
 Mechanics/ is the folder where we decide "what happens if we do x move". If we use the prexisting engine, we use api.py to do it.
 
@@ -90,15 +91,20 @@ Decision/ is "given current state, what move do we pick". Initially, we use heur
 
 Training/ is where we actually "teach" the policy value network with the output logs we got from the baseline heuristic 1v1's. This is where the actual machine learning happens.
 
-In app/, we create the actual UI and such later. for now just has main, which we use a dummy client to test things like making a false state and calling choose_action(state) and seeing what we get. 
+In app/, we create the actual local UI/control panel and move confirmation flow. for now just has main, which we use a dummy client to test things like making a false state and calling choose_action(state) and seeing what we get. 
 
 So our "pipeline" is as such:
 
-1. Integration gets browser data and builds a State object 
-2. Decision chooser.py is called with the created State
-3. chooser.py uses:
-    - mechanics/api.py to determine actual damage/results of each indiviual move IN THAT STATE
-    - either the heuristic ruleset or priority value to determine possible moves
-    - search.py to look ahead for possible move outcomes, finding best "move trees"
-4. chooser.py returns the top moves and their "scores"
-5. UI displays the results as a neat little overlay!
+1. poke-env agent receives a live showdown battle object when a move is requested
+2. State Parser converts battle into our internal State object
+3. Decision chooser.py is called with the created State
+4. chooser.py uses:
+    - mechanics/api.py
+    - decision/heuristic.py
+    - decision/search.py
+    - and later the learning model in training/model.py
+5. system returns top ranked move suggestions and reasoning
+6. UI/control panel displays these suggestions to the human
+7. human confirms which move to use
+8. confirmed move is passed back to the poke-env agent
+9. poke-env sends that move to showdown
