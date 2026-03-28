@@ -1,4 +1,14 @@
-"""Deterministic mechanics and rules interfaces used by decision/search code."""
+"""Deterministic mechanics/rules interfaces used by decision code."""
 
 # Plain-English summary:
-# This package is for battle math and rule outcomes, not move choice strategy.
+# This package computes battle facts, not move strategy.
+
+from psai.mechanics.api import (
+    ActionOutcome,
+    MechanicsAPI,
+)
+
+__all__ = [
+    "ActionOutcome",
+    "MechanicsAPI",
+]

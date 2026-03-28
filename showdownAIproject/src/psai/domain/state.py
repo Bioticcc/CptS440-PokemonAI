@@ -28,10 +28,14 @@ class PokemonSnapshot:
     boosts: dict[str, int] = field(default_factory=dict)
     types: tuple[str, ...] = field(default_factory=tuple)
     fainted: bool = False
+    identifier: str | None = None  # needed if in mechanics engine to get poke-env built in values
+    raw_pokemon: Any = None  # This is the poke-env pokemon object, used for built ins.
 
     # Feel free to add additional fields or remove the ones here. This is just some defaults I think could be good.
     # Some kind of error handling for invalid inputs could be good too, or automatically set info like
     # fainted being True if hp_fraction is 0. 
+
+    # will need opponent_active and friendly_active as raw_pokemon objects.
 
 
 @dataclass(slots=True)
@@ -43,7 +47,9 @@ class LegalAction:
     move_name: str
     move_type: str | None = None
     accuracy: float = 1.0 # should be somewhere in the state for that turn. Surely the battle object has this somewhere
+    priority: int = 0 # move priority (Quick Attack-style ordering before speed ties)
     is_switch: bool = False
+    raw_move: Any = None  # poke-env move object, used for built ins like raw_pokemon above.
 
     # add whatever you feel you need, same error handling could be good here too. 
     # maybe normalizing accuracy? unsure how accuracy numbers are shown, tbh. Good to check.
@@ -57,6 +63,7 @@ class State:
     friendly_active: PokemonSnapshot # our pokemon, currently active! use a snapshot.
     opponent_active: PokemonSnapshot # same, but opponent. Fill out info as we go. If we see it use a move, we should fill that info out for that pokemon. 
     legal_actions: tuple[LegalAction, ...] = field(default_factory=tuple) # all actions we can do this turn. 
+    raw_battle: Any = None  # optional pointer to raw poke-env battle object
     
     # Will definetly need more modifiers then this for the state, particularly the enemy pokemons team thus far.
     # absolutely need to keep track of that, and update it as we see more of the team. Can do in the function right below this? 
@@ -96,4 +103,3 @@ def parse_legal_actions(battle: Any) -> tuple[LegalAction, ...]:
     # change return type as needed, or keep as it is.
 
     raise legal_actions
-
