@@ -299,7 +299,7 @@ def get_move_first(state: State, action: LegalAction) -> bool:
 
     our_priority = int(getattr(action.raw_move, "priority", action.priority))
     opponent_moves = _opponent_known_moves(state)
-    opponent_priority = max(int(getattr(move, "priority", 0)) for move in opponent_moves)
+    opponent_priority = max((int(getattr(move, "priority", 0)) for move in opponent_moves), default=0)
 
     if our_priority != opponent_priority:
         return our_priority > opponent_priority

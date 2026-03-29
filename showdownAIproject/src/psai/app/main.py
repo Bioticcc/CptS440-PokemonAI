@@ -167,6 +167,10 @@ def run_battle(
     max_turns: int | None = None, # in case we get an infinite loop, like spamming harden or somethin.
 ) -> None: # no return, should run battle from start to finish in here, taking user input and having agent make moves
 
+
+    # WORTH NOTING, THIS IS THE MAIN BATTLE FUNCTION. This is the one we run when we have the model done.
+
+
     # heres the loop! 
     turns_ran = 0
 
@@ -213,6 +217,9 @@ def run_test_battle(
     max_turns: int | None = None,
 ) -> None:
 
+    # THIS IS THE MANUAL TEST BATTLE FUNCTION. You manually challenge the bot, and then use console
+    # to determine moves. Not really needed anymore, but its here since it was used. 
+
     turns_ran = 0
     last_prompted_turn = -1
 
@@ -228,6 +235,98 @@ def run_test_battle(
         if can_choose and current_turn != last_prompted_turn:
             chosen_action = get_user_choice([], battle)
             chosen_order = send_confirmed_move(player, battle, chosen_action)
+            player.set_pending_order(battle.battle_tag, chosen_order)
+            last_prompted_turn = current_turn
+
+        turns_ran += 1
+        if max_turns is not None and turns_ran >= max_turns:
+            break
+
+        time.sleep(0.1)
+
+    return
+
+
+def run_heuristic_training_battle(
+    player: Any,
+    *,
+    mechanics: MechanicsAPI,
+    top_k: int = 3,
+    max_turns: int | None = None,
+) -> None:
+
+    # THIS IS THE HEURISTIC AUTO TRAINING BATTLE FUNCTION. This does NOT take inputs, and runs the bot
+    # making decisions based on heurisitics and search only. 
+
+    turns_ran = 0
+    last_prompted_turn = -1
+
+    while True:
+        battle = get_battle(player)
+        if battle is None or battle.finished:
+            break
+
+        current_turn = int(battle.turn)
+        can_choose = bool(battle.available_moves or battle.available_switches)
+
+        if can_choose and current_turn != last_prompted_turn:
+            state = get_state(battle)
+            turn_suggestions = get_turn_suggestions(state, mechanics, top_k=top_k, model=None)
+            best_action = turn_suggestions[0].action
+
+            if best_action.is_switch:
+                selected_switch = list(battle.available_switches)[0]
+                chosen_order = player.create_order(selected_switch)
+            else:
+                selected_move = best_action.raw_move if best_action.raw_move is not None else list(battle.available_moves)[0]
+                chosen_order = player.create_order(selected_move)
+
+            player.set_pending_order(battle.battle_tag, chosen_order)
+            last_prompted_turn = current_turn
+
+        turns_ran += 1
+        if max_turns is not None and turns_ran >= max_turns:
+            break
+
+        time.sleep(0.1)
+
+    return
+
+
+def run_model_training_battle(
+    player: Any,
+    *,
+    mechanics: MechanicsAPI,
+    model: ModelBonusFn,
+    top_k: int = 3,
+    max_turns: int | None = None,
+) -> None:
+
+    # THIS IS THE MODEL AUTO TRAINING BATTLE FUNCTION. Same as above, but for the full model, instead.
+
+    turns_ran = 0
+    last_prompted_turn = -1
+
+    while True:
+        battle = get_battle(player)
+        if battle is None or battle.finished:
+            break
+
+        current_turn = int(battle.turn)
+        can_choose = bool(battle.available_moves or battle.available_switches)
+
+        if can_choose and current_turn != last_prompted_turn:
+            state = get_state(battle)
+            turn_suggestions = get_turn_suggestions(state, mechanics, top_k=top_k, model=model)
+            best_action = turn_suggestions[0].action
+
+            if best_action.is_switch:
+                selected_switch = list(battle.available_switches)[0]
+                chosen_order = player.create_order(selected_switch)
+            else:
+                selected_move = best_action.raw_move if best_action.raw_move is not None else list(battle.available_moves)[0]
+                chosen_order = player.create_order(selected_move)
+
             player.set_pending_order(battle.battle_tag, chosen_order)
             last_prompted_turn = current_turn
 
@@ -289,7 +388,13 @@ def main() -> int:
     config = PokeEnvConfig() # set config (user, pass, format)
     player = build_poke_env_player(config) # builds our poke-env player
     connected_battle = connect_to_battle(player, opponent_username="PokeTeach440", max_turns=100) # SHOULD connect to showdown!
-    run_test_battle(player, max_turns=100000)
+    
+    # DIFFERENT BATTLE TYPES, uncomment whichever one we run.
+
+    #run_battle(player, mechanics=MechanicsAPI(), top_k=3, model=None, max_turns=100) 
+    #run_test_battle(player, max_turns=100000)
+    run_heuristic_training_battle(player, mechanics=MechanicsAPI(), top_k=3, max_turns=100000)
+    #run_model_training_battle(player, mechanics=MechanicsAPI(), model=None, top_k=3, max_turns=100000)
 
 
 if __name__ == "__main__":

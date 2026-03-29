@@ -24,7 +24,12 @@ def get_opponent_response_adjustment(state, action, outcome):
     # and then get suprised by the opponent doing something else we deem unoptimal but is 
     # still better. I am betting this will be the main cause of our agent losing to people. 
 
-    return 0.0
+    weights = HeuristicWeights()
+    incoming_ko_penalty = weights.self_ko_penalty * outcome.ko_probability_to_self
+    incoming_damage_penalty = weights.incoming_damage_weight * outcome.expected_damage_to_self
+    tempo_penalty = 0.0 if outcome.move_first else (weights.move_first_bonus * 0.5)
+
+    return -(incoming_ko_penalty + incoming_damage_penalty + tempo_penalty)
 
 
 @dataclass(slots=True)
@@ -57,7 +62,7 @@ def rank_actions(
     # This is the big function for the search file. 
 
     cfg = config or SearchConfig() # use given for testing, or default specified above
-    candidates = [action for action in state.move_actions()] # gets possible moves
+    candidates = [action for action in state.legal_actions if not action.is_switch] # gets possible moves
     scored: list[ScoredAction] = [] # list of scores for each move
 
     for action in candidates: # for each possible move, determine the outcome and score with heuristics!
@@ -68,12 +73,10 @@ def rank_actions(
         # moves and how they effect our scores and mechanics engine results. Later this will be 
         # replaced with the actual learning model, but I havent even BEGUN to add that, so this will do.
         if cfg.depth >= 2: # if depth is 2 or more, we look ahead at the opponents response
-            depth2_adjustment = float(opponent_response_fn(state, action, outcome)) # estimate response
+            depth2_adjustment = float(get_opponent_response_adjustment(state, action, outcome)) # estimate response
             breakdown = dict(breakdown) # get the top terms from our score
+            breakdown["depth2_adjustment"] = depth2_adjustment # Now we add the adjusted score for that state based on the opponents response. 
 
-            # Now we add the adjusted score for that state based on the opponents response. 
-            # ess
-            breakdown["depth2_adjustment"] = depth2_adjustment  
             base_score += depth2_adjustment
 
         scored.append(ScoredAction(action=action, outcome=outcome, score=base_score, breakdown=breakdown))
