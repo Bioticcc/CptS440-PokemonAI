@@ -9,8 +9,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from dataclasses import dataclass
 from typing import Any
+
+from poke_env import AccountConfiguration, ShowdownServerConfiguration
+from poke_env.player import Player
 
 from psai.decision.chooser import ModelBonusFn, MoveSuggestion, choose_actions
 from psai.domain.state import State, parse_battle_to_state
@@ -47,53 +49,63 @@ def get_state(battle):
 
 
 
-@dataclass(slots=True) # using dataclass since its essentially a struct, no need for extra setup.
-# Essentially just the settings for the agent. Doesnt connect to a live battle itself. 
-class PokeEnvConfig:
-    # Here we are setting up the user config, essentially what allows our agent to connect to live games.
-    username: str = "PokeLearn440"
-    password: str = "CPTS440"
-    battle_format: str = "gen1randombattle" # forgot if this is actual name, may need to be changed
-    team: str | None = None  # pre made team! if we want it. since random battle, not needed probably. testing purposes?
+class pokeEnvPlayerInfo(Player):
 
-def build_poke_env_player(config: PokeEnvConfig) -> Any:
-# Creating a poke-env player using the config above. This will allow us to connect to live games later.
+    # PLAYER CLASS! This is what lets us connect to showdown, send moves, etc.
 
-    try:
-        from poke_env import AccountConfiguration, ShowdownServerConfiguration
-        from poke_env.player import Player
-    except ImportError as error: 
-        raise RuntimeError(
-            "poke-env is not installed. Install dependencies before live integration."
-        ) from error
+    def __init__(
+        self,
+        username: str = "PokeLearn440",
+        password: str = "CPTS440",
+        battle_format: str = "gen1randombattle",
+        team: str | None = None,
+    ) -> None:
+        self.username = username
+        self.password = password
+        self.battle_format = battle_format
+        self.team = team
 
-    class ConsoleControlPlayer(Player):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self._pending_orders: dict[str, Any] = {}
+        account_configuration = AccountConfiguration(username, password)
+        player_kwargs: dict[str, Any] = {
+            "account_configuration": account_configuration,
+            "server_configuration": ShowdownServerConfiguration,
+            "battle_format": battle_format,
+        }
+        if team:
+            player_kwargs["team"] = team
 
-        def set_pending_order(self, battle_tag: str, order: Any) -> None:
-            self._pending_orders[battle_tag] = order
+        super().__init__(**player_kwargs)
+        self._pending_orders: dict[str, Any] = {}
 
-        def choose_move(self, battle):
-            battle_tag = getattr(battle, "battle_tag", "")
+    # This stored pending move actions that we choose, then when prompted by showdown
+    # sends the move action to showdown.
+    def set_pending_order(self, battle_tag: str, order: Any) -> None:
+        self._pending_orders[battle_tag] = order
 
-            while True:
-                pending_order = self._pending_orders.pop(battle_tag, None)
-                if pending_order is not None:
-                    return pending_order
-                time.sleep(0.1)
 
-    account_configuration = AccountConfiguration(config.username, config.password)
-    player_kwargs: dict[str, Any] = { # player config from above
-        "account_configuration": account_configuration,
-        "server_configuration": ShowdownServerConfiguration,
-        "battle_format": config.battle_format,
-    }
-    if config.team:
-        player_kwargs["team"] = config.team
+    def choose_move(self, battle):
+        battle_tag = getattr(battle, "battle_tag", "")
 
-    return ConsoleControlPlayer(**player_kwargs) # and now we have a player! This is what we pass into get_battle. 
+        while True:
+            pending_order = self._pending_orders.pop(battle_tag, None)
+            if pending_order is not None:
+                return pending_order
+            time.sleep(0.1)
+
+
+def build_poke_env_player(
+    username: str = "PokeLearn440",
+    password: str = "CPTS440",
+    battle_format: str = "gen1randombattle",
+    team: str | None = None,
+) -> pokeEnvPlayerInfo:
+    # Backwards-compatible helper to construct the unified class.
+    return pokeEnvPlayerInfo(
+        username=username,
+        password=password,
+        battle_format=battle_format,
+        team=team,
+    )
 
 
 def get_turn_suggestions( 
@@ -263,6 +275,7 @@ def run_heuristic_training_battle(
 
     while True:
         battle = get_battle(player)
+
         if battle is None or battle.finished:
             break
 
@@ -346,8 +359,15 @@ def connect_to_battle(
     max_turns: int | None = None,
 ) -> Any:
 
-    # ASYNC GOBBLEDEEGOOK. what lets us connect to a battle.
-
+    # ASYNC GOBBLEDEGOOK. what lets us connect to a battle.
+    # To be more detailed, async lets us run a function, then do background work while we wait
+    # for a return value/exit from the running function. In this case, we run the accept_challenge,
+    # Which will wait for a challenge to be sent from the given opponent then auto accepts it.
+    # however, in the background we have a loop that is checking constantly if we have actually connected to
+    # the battle or not, and once we do it outputs the info. 
+    # Essentially, this is just a fancy way of having the ability to log when we connect to the battle.
+    # Unfortunately, async IS required for this too work due to poke-env.
+    
     async def _connect() -> Any:
         accept_task = asyncio.create_task(player.accept_challenges(opponent_username, 1))
         wait_loops = max_turns or 1000
@@ -385,8 +405,7 @@ def main() -> int:
     #python3 -m psai.app.main
 
     
-    config = PokeEnvConfig() # set config (user, pass, format)
-    player = build_poke_env_player(config) # builds our poke-env player
+    player = pokeEnvPlayerInfo() # set config and build player together
     connected_battle = connect_to_battle(player, opponent_username="PokeTeach440", max_turns=100) # SHOULD connect to showdown!
     
     # DIFFERENT BATTLE TYPES, uncomment whichever one we run.
