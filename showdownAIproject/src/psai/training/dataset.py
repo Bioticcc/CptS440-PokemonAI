@@ -91,7 +91,16 @@ def default_policy_target(
     if not legal_action_ids: # If there are no legal actions just return a 0 vector
         return target
 
-    idx = list(legal_action_ids).index(chosen_action_id) # index of that legal action
+    legal_ids = list(legal_action_ids)
+    try:
+        idx = legal_ids.index(chosen_action_id) # index of that legal action
+    except ValueError:
+        # Abnormal request fallbacks may choose a raw request slot that doesn't map to
+        # parsed legal ids; avoid crashing the run in that case.
+        if chosen_action_id.startswith("request_slot_fallback:") and legal_ids:
+            idx = 0
+        else:
+            return target
 
     if idx < action_dim: 
         target[idx] = 1.0

@@ -336,14 +336,29 @@ def _move_action_id_from_move(move: Any) -> str:
     return str(getattr(move, "id", None) or getattr(move, "move", None) or "fallback_move")
 
 
+def _resolve_switch_identifier(target: Any) -> str:
+    identifier = getattr(target, "identifier", None)
+    if callable(identifier):
+        try:
+            identifier = identifier()
+        except Exception:
+            identifier = None
+
+    if not identifier:
+        identifier = getattr(target, "species", None) or getattr(target, "name", None)
+    if callable(identifier):
+        try:
+            identifier = identifier()
+        except Exception:
+            identifier = None
+
+    if not identifier:
+        identifier = "fallback"
+    return str(identifier)
+
+
 def _switch_action_id_from_target(target: Any) -> str:
-    identifier = str(
-        getattr(target, "identifier", None)
-        or getattr(target, "species", None)
-        or getattr(target, "name", None)
-        or "fallback"
-    )
-    return f"switch:{identifier}"
+    return f"switch:{_resolve_switch_identifier(target)}"
 
 
 def _default_order(player: Any) -> Any:
@@ -519,6 +534,34 @@ def _print_collection_progress(
         f"[{phase_label}] cycle={cycle_id} decisions={decisions_collected}/{decision_budget} "
         f"played={decisions_played} battles={battles_finished}/{battles_launched}"
     )
+
+
+def _safe_write_decision_record(
+    output_path: Path,
+    *,
+    state: State,
+    chosen_action_id: str,
+    outcome_value: float,
+    metadata: dict[str, Any],
+    phase_label: str,
+) -> None:
+    try:
+        record = make_log_record(
+            state,
+            chosen_action_id=chosen_action_id,
+            outcome_value=outcome_value,
+            metadata=metadata,
+        )
+        write_log_record(output_path, record)
+    except Exception as exc:
+        battle_tag = str(getattr(state, "battle_tag", "") or "")
+        turn_value = getattr(state, "turn_number", None)
+        if turn_value is None:
+            turn_value = getattr(state, "turn", None)
+        print(
+            f"[{phase_label}] log_record_failed battle={battle_tag} turn={turn_value} "
+            f"chosen={chosen_action_id} error={type(exc).__name__}: {exc}"
+        )
 
 
 def run_battle(
@@ -750,8 +793,9 @@ def run_heuristic_training_battle(
             outcome_value, battle_result = _battle_outcome_value(battle)
             buffered = pending_by_battle.pop(battle_tag_str, [])
             for state, chosen_action_id in buffered:
-                record = make_log_record(
-                    state,
+                _safe_write_decision_record(
+                    output_path,
+                    state=state,
                     chosen_action_id=chosen_action_id,
                     outcome_value=outcome_value,
                     metadata={
@@ -759,8 +803,8 @@ def run_heuristic_training_battle(
                         "cycle_id": int(cycle_id),
                         "battle_result": battle_result,
                     },
+                    phase_label="heuristic",
                 )
-                write_log_record(output_path, record)
 
             finished_tags.add(battle_tag_str)
             last_prompted_request.pop(battle_tag_str, None)
@@ -867,8 +911,9 @@ def run_heuristic_training_battle(
 
     for battle_tag, buffered in list(pending_by_battle.items()):
         for state, chosen_action_id in buffered:
-            record = make_log_record(
-                state,
+            _safe_write_decision_record(
+                output_path,
+                state=state,
                 chosen_action_id=chosen_action_id,
                 outcome_value=0.0,
                 metadata={
@@ -876,8 +921,8 @@ def run_heuristic_training_battle(
                     "cycle_id": int(cycle_id),
                     "battle_result": "unknown",
                 },
+                phase_label="heuristic",
             )
-            write_log_record(output_path, record)
         pending_by_battle.pop(battle_tag, None)
 
     if verbose:
@@ -975,13 +1020,14 @@ def run_model_training_battle(
                 }
                 if model_checkpoint is not None:
                     metadata["model_checkpoint"] = model_checkpoint
-                record = make_log_record(
-                    state,
+                _safe_write_decision_record(
+                    output_path,
+                    state=state,
                     chosen_action_id=chosen_action_id,
                     outcome_value=outcome_value,
                     metadata=metadata,
+                    phase_label="model",
                 )
-                write_log_record(output_path, record)
 
             finished_tags.add(battle_tag_str)
             last_prompted_request.pop(battle_tag_str, None)
@@ -1095,13 +1141,14 @@ def run_model_training_battle(
             }
             if model_checkpoint is not None:
                 metadata["model_checkpoint"] = model_checkpoint
-            record = make_log_record(
-                state,
+            _safe_write_decision_record(
+                output_path,
+                state=state,
                 chosen_action_id=chosen_action_id,
                 outcome_value=0.0,
                 metadata=metadata,
+                phase_label="model",
             )
-            write_log_record(output_path, record)
         pending_by_battle.pop(battle_tag, None)
 
     if verbose:
