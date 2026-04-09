@@ -76,8 +76,6 @@ def _move_inflicts_status(action: LegalAction) -> bool:
     raw_move = action.raw_move
     if getattr(raw_move, "status", None):
         return True
-    if getattr(raw_move, "volatile_status", None):
-        return True
 
     secondary = getattr(raw_move, "secondary", None)
     if isinstance(secondary, dict):

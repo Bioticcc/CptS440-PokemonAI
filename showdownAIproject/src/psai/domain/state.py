@@ -184,12 +184,16 @@ def parse_legal_actions(battle: Any) -> tuple[LegalAction, ...]:
 
     available_moves = list(getattr(battle, "available_moves", []) or [])
     for move in available_moves:
-        move_type = getattr(move, "type", None)
-        move_type_name = getattr(move_type, "name", None)
+        move_type = _safe_getattr(move, "type", None)
+        move_type_name = _safe_getattr(move_type, "name", None)
         base_power, damage_class, target = _extract_move_details(move)
-        accuracy = _normalize_accuracy(getattr(move, "accuracy", 1.0))
-        action_id = str(getattr(move, "id", None) or getattr(move, "move", None) or "move")
+        accuracy = _normalize_accuracy(_safe_getattr(move, "accuracy", 1.0))
+        action_id = str(_safe_getattr(move, "id", None) or _safe_getattr(move, "move", None) or "move")
         current_pp, max_pp = _extract_move_pp(move)
+        try:
+            priority = int(_safe_getattr(move, "priority", 0) or 0)
+        except (TypeError, ValueError):
+            priority = 0
 
         legal_actions.append(
             LegalAction(
@@ -200,7 +204,7 @@ def parse_legal_actions(battle: Any) -> tuple[LegalAction, ...]:
                 damage_class=damage_class,
                 target=target,
                 accuracy=accuracy,
-                priority=int(getattr(move, "priority", 0) or 0),
+                priority=priority,
                 current_pp=current_pp,
                 max_pp=max_pp,
                 is_switch=False,
@@ -211,8 +215,8 @@ def parse_legal_actions(battle: Any) -> tuple[LegalAction, ...]:
     # Encode switches as actions so decision code can rank them alongside moves.
     available_switches = list(getattr(battle, "available_switches", []) or [])
     for index, target in enumerate(available_switches, start=1):
-        identifier = str(getattr(target, "identifier", None) or getattr(target, "species", None) or index)
-        species = str(getattr(target, "species", None) or getattr(target, "name", None) or identifier)
+        identifier = _extract_switch_identifier(target, index)
+        species = str(_safe_getattr(target, "species", None) or _safe_getattr(target, "name", None) or identifier)
         legal_actions.append(
             LegalAction(
                 action_id=f"switch:{identifier}",
@@ -338,13 +342,13 @@ def _extract_request_mode(battle: Any, legal_actions: tuple[LegalAction, ...]) -
 def _extract_move_pp(move: Any) -> tuple[int | None, int | None]:
 
     # Move objects can expose PP with slightly different attribute names, so this checks for both.
-    current_pp = getattr(move, "current_pp", None)
+    current_pp = _safe_getattr(move, "current_pp", None)
     if current_pp is None:
-        current_pp = getattr(move, "pp", None)
+        current_pp = _safe_getattr(move, "pp", None)
 
-    max_pp = getattr(move, "max_pp", None)
+    max_pp = _safe_getattr(move, "max_pp", None)
     if max_pp is None:
-        max_pp = getattr(move, "maxpp", None)
+        max_pp = _safe_getattr(move, "maxpp", None)
 
     try:
         normalized_current = None if current_pp is None else max(0, int(current_pp))
@@ -361,19 +365,19 @@ def _extract_move_pp(move: Any) -> tuple[int | None, int | None]:
 
 def _extract_move_details(move: Any) -> tuple[int | None, str | None, str | None]:
 
-    base_power = getattr(move, "base_power", None)
+    base_power = _safe_getattr(move, "base_power", None)
     if base_power is None:
-        base_power = getattr(move, "power", None)
+        base_power = _safe_getattr(move, "power", None)
 
-    damage_class = getattr(move, "damage_class", None)
+    damage_class = _safe_getattr(move, "damage_class", None)
     if damage_class is None:
-        damage_class = getattr(move, "category", None)
+        damage_class = _safe_getattr(move, "category", None)
     if damage_class is not None:
-        damage_class = getattr(damage_class, "name", damage_class)
+        damage_class = _safe_getattr(damage_class, "name", damage_class)
 
-    target = getattr(move, "target", None)
+    target = _safe_getattr(move, "target", None)
     if target is not None:
-        target = getattr(target, "name", target)
+        target = _safe_getattr(target, "name", target)
 
     try:
         normalized_power = None if base_power is None else max(0, int(base_power))
@@ -468,9 +472,41 @@ def _extract_known_move_names(raw_pokemon: Any) -> tuple[str, ...]:
     moves_dict = getattr(raw_pokemon, "moves", None) or {}
     names: list[str] = []
     for move_id, move_obj in dict(moves_dict).items():
-        move_name = getattr(move_obj, "id", None) or getattr(move_obj, "move", None) or move_id
+        move_name = _safe_getattr(move_obj, "id", None) or _safe_getattr(move_obj, "move", None) or move_id
         names.append(str(move_name))
     return tuple(names)
+
+
+def _safe_getattr(obj: Any, attr: str, default: Any = None) -> Any:
+
+    if obj is None:
+        return default
+    try:
+        return getattr(obj, attr)
+    except Exception:
+        return default
+
+
+def _extract_switch_identifier(target: Any, fallback_index: int) -> str:
+
+    identifier = _safe_getattr(target, "identifier", None)
+    if callable(identifier):
+        try:
+            identifier = identifier()
+        except Exception:
+            identifier = None
+
+    if not identifier:
+        identifier = _safe_getattr(target, "species", None) or _safe_getattr(target, "name", None)
+    if callable(identifier):
+        try:
+            identifier = identifier()
+        except Exception:
+            identifier = None
+
+    if not identifier:
+        identifier = fallback_index
+    return str(identifier)
 
 
 def _parse_team_snapshots(battle: Any, *, side: str) -> tuple[PokemonSnapshot, ...]:

@@ -61,6 +61,39 @@ def _request_move_ids_from_request(request: dict[str, Any] | None) -> tuple[str,
     return tuple(move_ids)
 
 
+def _request_first_enabled_move_slot(request: dict[str, Any] | None) -> tuple[int | None, str | None]:
+    if not isinstance(request, dict):
+        return None, None
+
+    active_payload = request.get("active")
+    if not isinstance(active_payload, list) or not active_payload:
+        return None, None
+
+    first_active = active_payload[0]
+    if not isinstance(first_active, dict):
+        return None, None
+
+    moves_payload = first_active.get("moves", [])
+    if not isinstance(moves_payload, list):
+        return None, None
+
+    for index, move_payload in enumerate(moves_payload, start=1):
+        if not isinstance(move_payload, dict):
+            continue
+        if move_payload.get("disabled", False):
+            continue
+
+        move_id = move_payload.get("id")
+        if move_id is None:
+            move_id = move_payload.get("move")
+        if move_id is None:
+            move_id = f"slot_{index}"
+        normalized = str(move_id).strip().lower().replace(" ", "")
+        return index, normalized
+
+    return None, None
+
+
 def _install_poke_env_move_request_fallback() -> None:
     current_impl = Pokemon.available_moves_from_request
     if getattr(current_impl, "__name__", "") == "_psai_available_moves_from_request":
@@ -386,8 +419,30 @@ def _choose_order_for_request(
 ) -> tuple[Any, str]:
     available_moves = list(getattr(battle, "available_moves", []) or [])
     available_switches = list(getattr(battle, "available_switches", []) or [])
+    request_payload = getattr(battle, "_last_request", None)
+    request_move_ids = _request_move_ids_from_request(request_payload if isinstance(request_payload, dict) else None)
+    request_slot_index, request_slot_move_id = _request_first_enabled_move_slot(
+        request_payload if isinstance(request_payload, dict) else None
+    )
     best_action = turn_suggestions[0].action if turn_suggestions else None
     mode = state.request_mode
+
+    # Dealing with abnormal showdown requests:
+    # if request parsing does not produce standard move objects, we keep the game moving by
+    # (1) selecting the first enabled move slot from the raw request payload,
+    # (2) otherwise selecting the first legal switch, then
+    # (3) falling back to /choose default.
+    if mode == "move_request_unparsed":
+        if request_slot_index is not None:
+            slot_id = request_slot_move_id or f"slot_{request_slot_index}"
+            return (
+                player.create_order(f"/choose move {request_slot_index}"),
+                f"request_slot_fallback:{slot_id}",
+            )
+        selected_switch = _select_switch_target(available_switches, None)
+        if selected_switch is not None:
+            return player.create_order(selected_switch), _switch_action_id_from_target(selected_switch)
+        return _default_order(player), "default"
 
     if mode in {"forced_switch", "switch_only"}:
         selected_switch = _select_switch_target(available_switches, best_action)
@@ -411,6 +466,13 @@ def _choose_order_for_request(
     selected_switch = _select_switch_target(available_switches, best_action)
     if selected_switch is not None:
         return player.create_order(selected_switch), _switch_action_id_from_target(selected_switch)
+
+    if request_move_ids and request_slot_index is not None:
+        slot_id = request_slot_move_id or request_move_ids[0]
+        return (
+            player.create_order(f"/choose move {request_slot_index}"),
+            f"request_slot_fallback:{slot_id}",
+        )
 
     return _default_order(player), "default"
 
