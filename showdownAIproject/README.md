@@ -11,7 +11,7 @@
 
 ## run these in (.venv) 
 - python -m pip install --upgrade pip wheel setuptools
-- `pip install -e .` 
+- pip install -e . 
     - This now installs the key runtime deps from `pyproject.toml`, including `poke-env` and `torch`.
 
 # ----------------------------------------------
@@ -21,6 +21,32 @@ source .venv/bin/activate
 pip install -e .   
 python3 -m psai.app.main
 # ----------------------------------------------
+
+# GIT CHANGES:
+## PUSH
+cd /home/jeezu/CptS440-PokemonAI
+git checkout main
+git status
+git add -u
+git commit -m ""
+git push origin main
+git rev-parse --short HEAD
+## PULL
+cd /home/kyle/Desktop/Adam/CptS440-PokemonAI
+git checkout main
+git status
+git pull --ff-only origin main
+git rev-parse --short HEAD
+git rev-parse --short origin/main
+
+cd showdownAIproject
+source .venv/bin/activate
+pip install -e .
+
+# INVALID RUN? DELETE ALL LOGS: (THIS MEANS ALL. IF YOU WANT SPECIFIC, DO SPECIFIC.)
+rm -f training/battle_logs.jsonl
+rm -rf training/artifacts
+mkdir -p training/artifacts/checkpoints training/artifacts/metrics
 
 
 ## SPECIFIC ROLES (choose one of these you want for now)

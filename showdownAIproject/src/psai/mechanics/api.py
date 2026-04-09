@@ -80,18 +80,40 @@ def _status_is(status_value: str | None, *names: str) -> bool:
     return lowered in {name.lower() for name in names}
 
 
+def _safe_getattr(obj, attr: str, default=None):
+
+    if obj is None:
+        return default
+    try:
+        return getattr(obj, attr)
+    except Exception:
+        return default
+
+
+def _safe_int(value, default: int = 0) -> int:
+
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _safe_priority_from_move(move, default: int = 0) -> int:
+    return _safe_int(_safe_getattr(move, "priority", default), default)
+
+
 def _is_status_category_action(action: LegalAction) -> bool:
 
     if action.is_switch:
         return False
-    raw_move = getattr(action, "raw_move", None)
+    raw_move = _safe_getattr(action, "raw_move", None)
     if raw_move is not None:
-        category = getattr(raw_move, "category", None)
-        category_name = getattr(category, "name", None)
+        category = _safe_getattr(raw_move, "category", None)
+        category_name = _safe_getattr(category, "name", None)
         if str(category_name or category or "").lower() == "status":
             return True
 
-    damage_class = getattr(action, "damage_class", None)
+    damage_class = _safe_getattr(action, "damage_class", None)
     if str(damage_class or "").lower() == "status":
         return True
 
@@ -226,11 +248,11 @@ def _make_opponent_action(move) -> LegalAction:
 
     # converts raw opponent action from poke-env into our LegalAction dataclass.
 
-    move_type = getattr(move, "type", None)
-    move_type_name = str(getattr(move_type, "name", "")) or None
-    action_id = str(getattr(move, "id", None) or "opponent_move")
+    move_type = _safe_getattr(move, "type", None)
+    move_type_name = str(_safe_getattr(move_type, "name", "")) or None
+    action_id = str(_safe_getattr(move, "id", None) or "opponent_move")
     try:
-        accuracy = float(getattr(move, "accuracy", 1.0))
+        accuracy = float(_safe_getattr(move, "accuracy", 1.0))
     except (TypeError, ValueError):
         accuracy = 1.0
     return LegalAction(
@@ -238,7 +260,7 @@ def _make_opponent_action(move) -> LegalAction:
         move_name=action_id,
         move_type=move_type_name,
         accuracy=accuracy,
-        priority=int(getattr(move, "priority", 0)),
+        priority=_safe_priority_from_move(move, 0),
         is_switch=False,
         raw_move=move,
     )
@@ -369,9 +391,9 @@ def get_move_first(state: State, action: LegalAction) -> bool:
     if action.is_switch:
         return True
 
-    our_priority = int(getattr(action.raw_move, "priority", action.priority) or action.priority)
+    our_priority = _safe_priority_from_move(action.raw_move, action.priority)
     opponent_moves = _opponent_known_moves(state)
-    opponent_priority = max((int(getattr(move, "priority", 0)) for move in opponent_moves), default=0)
+    opponent_priority = max((_safe_priority_from_move(move, 0) for move in opponent_moves), default=0)
 
     if our_priority != opponent_priority:
         return our_priority > opponent_priority
@@ -388,7 +410,7 @@ def get_reliability(state: State, action: LegalAction) -> float:
     if action.is_switch:
         return 1.0
 
-    raw_accuracy = getattr(action.raw_move, "accuracy", action.accuracy)
+    raw_accuracy = _safe_getattr(action.raw_move, "accuracy", action.accuracy)
     try:
         reliability = float(raw_accuracy)
     except (TypeError, ValueError):

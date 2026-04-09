@@ -233,9 +233,19 @@ def get_turn_suggestions(
     top_k: int = 3,
     model: ModelBonusFn | None = None,
 ) -> list[MoveSuggestion]:
-
-    suggestions = choose_actions(state, mechanics, top_k=top_k, model=model)
-    return suggestions
+    try:
+        suggestions = choose_actions(state, mechanics, top_k=top_k, model=model)
+        return suggestions
+    except Exception as exc:
+        battle_tag = str(getattr(state, "battle_tag", "") or "")
+        turn_value = getattr(state, "turn_number", None)
+        if turn_value is None:
+            turn_value = getattr(state, "turn", None)
+        print(
+            f"[chooser] suggestion_failed battle={battle_tag} turn={turn_value} "
+            f"error={type(exc).__name__}: {exc}"
+        )
+        return []
 
 
 def get_user_choice(turn_suggestions: list[MoveSuggestion], battle: Any) -> Any:
