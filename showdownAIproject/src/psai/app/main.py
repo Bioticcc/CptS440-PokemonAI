@@ -624,7 +624,19 @@ def run_test_battle(
             if last_prompted_request.get(battle_tag) == request_signature:
                 continue
 
-            state = parse_battle_to_state(battle)
+            try:
+                state = parse_battle_to_state(battle)
+            except Exception as exc:
+                if verbose:
+                    print(
+                        f"[test] parse_state_failed battle={battle_tag} "
+                        f"error={type(exc).__name__}: {exc}. Sending default order."
+                    )
+                if hasattr(player, "set_pending_order"):
+                    player.set_pending_order(battle_tag, _default_order(player))
+                last_prompted_request[battle_tag] = request_signature
+                turns_ran += 1
+                continue
             if not _has_actionable_request(state, battle):
                 continue
 
@@ -776,7 +788,18 @@ def run_heuristic_training_battle(
             if last_prompted_request.get(battle_tag) == request_signature:
                 continue
 
-            state = parse_battle_to_state(battle)
+            try:
+                state = parse_battle_to_state(battle)
+            except Exception as exc:
+                if verbose:
+                    print(
+                        f"[heuristic] parse_state_failed battle={battle_tag} "
+                        f"error={type(exc).__name__}: {exc}. Sending default order."
+                    )
+                if hasattr(player, "set_pending_order"):
+                    player.set_pending_order(battle_tag, _default_order(player))
+                last_prompted_request[battle_tag] = request_signature
+                continue
             if not _has_actionable_request(state, battle):
                 continue
 
@@ -986,7 +1009,18 @@ def run_model_training_battle(
             if last_prompted_request.get(battle_tag) == request_signature:
                 continue
 
-            state = parse_battle_to_state(battle)
+            try:
+                state = parse_battle_to_state(battle)
+            except Exception as exc:
+                if verbose:
+                    print(
+                        f"[model] parse_state_failed battle={battle_tag} "
+                        f"error={type(exc).__name__}: {exc}. Sending default order."
+                    )
+                if hasattr(player, "set_pending_order"):
+                    player.set_pending_order(battle_tag, _default_order(player))
+                last_prompted_request[battle_tag] = request_signature
+                continue
             if not _has_actionable_request(state, battle):
                 continue
 

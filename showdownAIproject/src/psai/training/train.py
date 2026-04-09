@@ -444,7 +444,18 @@ def run_training_cycle(
                     if last_prompted_request.get(battle_tag) == request_signature:
                         continue
 
-                    state = parse_battle_to_state(battle)
+                    try:
+                        state = parse_battle_to_state(battle)
+                    except Exception as exc:
+                        if config.verbose:
+                            print(
+                                f"[eval] parse_state_failed battle={battle_tag} "
+                                f"error={type(exc).__name__}: {exc}. Sending default order."
+                            )
+                        if hasattr(player, "set_pending_order"):
+                            player.set_pending_order(battle_tag, app_main._default_order(player))
+                        last_prompted_request[battle_tag] = request_signature
+                        continue
                     if not app_main._has_actionable_request(state, battle):
                         continue
 
