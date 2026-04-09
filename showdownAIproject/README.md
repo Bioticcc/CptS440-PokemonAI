@@ -14,6 +14,15 @@
 - `pip install -e .` 
     - This now installs the key runtime deps from `pyproject.toml`, including `poke-env` and `torch`.
 
+# ----------------------------------------------
+HOW TO RUN: 
+cd /home/jeezu/CptS440-PokemonAI/showdownAIproject
+source .venv/bin/activate
+pip install -e .   
+python3 -m psai.app.main
+# ----------------------------------------------
+
+
 ## SPECIFIC ROLES (choose one of these you want for now)
 - Showdown Integration and State Parser
     - What you need to do here is connect to showdown through poke-env (the agent itself is the actual showdown player/client), receive the live battle object each turn, and have a State object class that is updated every turn. State will have parameters like HP%, status, boosts, types, moves (for the enemy pokemon, only the ones that we have seen so far), item/ability if we know it.

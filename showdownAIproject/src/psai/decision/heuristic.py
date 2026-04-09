@@ -31,8 +31,63 @@ class HeuristicWeights:
     type_effectiveness_weight: float = 60.0
     reliability_weight: float = 40.0
     fainted_bonus: float = 2000.0
+    new_status_bonus: float = 80.0
+    redundant_status_penalty: float = 260.0
+    status_move_base_penalty: float = 40.0
+    status_on_low_hp_penalty: float = 180.0
+    low_hp_finish_bonus: float = 220.0
+    low_hp_finish_threshold: float = 0.35
 
     # To add: PP, revealed opp team, setup context (MAYBE, THIS WILL BE HARD), etc.
+
+
+def _to_lower_text(value: object) -> str:
+    if value is None:
+        return ""
+    name_value = getattr(value, "name", None)
+    if name_value is not None:
+        return str(name_value).lower()
+    return str(value).lower()
+
+
+def _is_status_move(action: LegalAction) -> bool:
+    if action.is_switch:
+        return False
+
+    raw_move = action.raw_move
+    category_text = _to_lower_text(getattr(raw_move, "category", None)) if raw_move is not None else ""
+    if category_text == "status":
+        return True
+
+    damage_class_text = _to_lower_text(action.damage_class)
+    if damage_class_text == "status":
+        return True
+
+    base_power = action.base_power
+    if base_power is not None and int(base_power) <= 0:
+        return True
+    return False
+
+
+def _move_inflicts_status(action: LegalAction) -> bool:
+    if action.is_switch or action.raw_move is None:
+        return False
+
+    raw_move = action.raw_move
+    if getattr(raw_move, "status", None):
+        return True
+    if getattr(raw_move, "volatile_status", None):
+        return True
+
+    secondary = getattr(raw_move, "secondary", None)
+    if isinstance(secondary, dict):
+        return bool(secondary.get("status") or secondary.get("volatileStatus"))
+    if isinstance(secondary, list):
+        for entry in secondary:
+            if isinstance(entry, dict) and (entry.get("status") or entry.get("volatileStatus")):
+                return True
+
+    return False
 
 
 def score_action(
@@ -69,6 +124,22 @@ def score_action(
         terms["friendly_fainted"] = -w.fainted_bonus
     if action.is_switch:
         terms["switch_penalty_phase1"] = -50.0
+
+    status_move = _is_status_move(action)
+    inflicts_status = _move_inflicts_status(action)
+    opponent_has_status = bool(state.opponent_active.status)
+    opponent_low_hp = float(state.opponent_active.hp_fraction) <= float(w.low_hp_finish_threshold)
+
+    if status_move:
+        terms["status_move_base_penalty"] = -w.status_move_base_penalty
+    if inflicts_status and not opponent_has_status:
+        terms["new_status_bonus"] = w.new_status_bonus
+    if inflicts_status and opponent_has_status:
+        terms["redundant_status_penalty"] = -w.redundant_status_penalty
+    if status_move and opponent_low_hp:
+        terms["status_on_low_hp_penalty"] = -w.status_on_low_hp_penalty
+    if (not status_move) and opponent_low_hp:
+        terms["low_hp_finish_bonus"] = w.low_hp_finish_bonus * outcome.expected_damage_to_opponent
 
     total_score = sum(terms.values()) # we then jsut find the total value of all the terms after considering conditionals.
     return total_score, terms # return that total score for the action, as well as the terms for explanation.

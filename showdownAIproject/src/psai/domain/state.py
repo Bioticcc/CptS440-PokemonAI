@@ -84,6 +84,7 @@ class State:
     turn: int | None = None  # Legacy alias kept for compatibility with older call-sites/tests.
     turn_number: int | None = None
     forced_switch: bool = False
+    request_mode: str = "unknown"
     # Full known team info for both sides
     friendly_team: tuple[PokemonSnapshot, ...] = field(default_factory=tuple)
     opponent_team: tuple[PokemonSnapshot, ...] = field(default_factory=tuple)
@@ -127,12 +128,14 @@ def parse_battle_to_state(battle: Any) -> State:
     friendly_team = _parse_team_snapshots(battle, side="friendly")
     opponent_team = _parse_team_snapshots(battle, side="opponent")
     legal_actions = parse_legal_actions(battle)
+    request_mode = _extract_request_mode(battle, legal_actions)
 
     return State(
         battle_tag=battle_tag,
         turn=turn_number,
         turn_number=turn_number,
         forced_switch=forced_switch,
+        request_mode=request_mode,
         friendly_active=friendly_active,
         opponent_active=opponent_active,
         friendly_team=friendly_team,
@@ -258,6 +261,80 @@ def _extract_forced_switch(battle: Any) -> bool:
     return bool(force_switch)
 
 
+def _extract_last_request(battle: Any) -> dict[str, Any] | None:
+
+    request = getattr(battle, "_last_request", None)
+    if isinstance(request, dict):
+        return request
+    return None
+
+
+def _extract_request_move_ids(battle: Any) -> tuple[str, ...]:
+
+    request = _extract_last_request(battle)
+    if request is None:
+        return ()
+
+    active = request.get("active")
+    if not isinstance(active, list) or not active:
+        return ()
+
+    active_request = active[0]
+    if not isinstance(active_request, dict):
+        return ()
+
+    payloads = active_request.get("moves", [])
+    if not isinstance(payloads, list):
+        return ()
+
+    move_ids: list[str] = []
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("disabled", False):
+            continue
+
+        move_id = payload.get("id")
+        if move_id is None:
+            move_id = payload.get("move")
+        if move_id is None:
+            continue
+
+        normalized = str(move_id).strip().lower().replace(" ", "")
+        if normalized:
+            move_ids.append(normalized)
+
+    return tuple(move_ids)
+
+
+def _extract_request_mode(battle: Any, legal_actions: tuple[LegalAction, ...]) -> str:
+
+    request = _extract_last_request(battle)
+    request_wait = bool(request.get("wait", False)) if request is not None else bool(getattr(battle, "_wait", False))
+    if request_wait:
+        return "wait"
+
+    if request is not None and bool(request.get("teamPreview", False)):
+        return "team_preview"
+
+    if _extract_forced_switch(battle):
+        return "forced_switch"
+
+    has_move = any(not action.is_switch for action in legal_actions)
+    has_switch = any(action.is_switch for action in legal_actions)
+    if has_move and has_switch:
+        return "move_or_switch"
+    if has_move:
+        return "move_only"
+    if has_switch:
+        return "switch_only"
+
+    if _extract_request_move_ids(battle):
+        return "move_request_unparsed"
+
+    return "unknown"
+
+
 def _extract_move_pp(move: Any) -> tuple[int | None, int | None]:
 
     # Move objects can expose PP with slightly different attribute names, so this checks for both.
@@ -289,6 +366,8 @@ def _extract_move_details(move: Any) -> tuple[int | None, str | None, str | None
         base_power = getattr(move, "power", None)
 
     damage_class = getattr(move, "damage_class", None)
+    if damage_class is None:
+        damage_class = getattr(move, "category", None)
     if damage_class is not None:
         damage_class = getattr(damage_class, "name", damage_class)
 

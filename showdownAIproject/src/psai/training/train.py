@@ -27,7 +27,6 @@ else:
 
 from psai.training.dataset import BattleLogRecord, records_to_numpy
 from psai.training.model import PolicyValueMLP
-import psai.app.main as app_main
 from psai.decision.chooser import ModelBonusFn
 from psai.domain.state import LegalAction, State, parse_battle_to_state
 from psai.mechanics.api import MechanicsAPI
@@ -46,6 +45,7 @@ class TrainConfig:
     value_loss_weight: float = 1.0 # how much important we give to value loss vs policy loss. 
     device: str = "cpu" # uses cpu or gpu
     checkpoint_path: str | None = None # where to save models during training, if needed.
+    verbose: bool = True
 
 
 def _require_torch() -> None: # guard
@@ -167,6 +167,13 @@ def train_policy_value(
         metrics["policy_loss"].append(epoch_policy_loss / denom)
         metrics["value_loss"].append(epoch_value_loss / denom)
         metrics["total_loss"].append(epoch_total_loss / denom)
+        if cfg.verbose:
+            print(
+                f"[train] epoch {epoch + 1}/{cfg.epochs} "
+                f"policy_loss={metrics['policy_loss'][-1]:.4f} "
+                f"value_loss={metrics['value_loss'][-1]:.4f} "
+                f"total_loss={metrics['total_loss'][-1]:.4f}"
+            )
 
     if cfg.checkpoint_path:
         save_checkpoint(
@@ -198,6 +205,11 @@ class TrainingLoopConfig:
     model_hidden_sizes: tuple[int, ...] = (128, 64)
     train_config: TrainConfig = field(default_factory=TrainConfig)
     collection_n_games: int | None = None
+    verbose: bool = True
+    print_turn_suggestions: bool = True
+    print_top_k: int = 3
+    print_every_decisions: int = 100
+    eval_print_every_games: int = 10
 
 
 def _normalize_features_for_model(features: list[float], input_dim: int) -> list[float]:
@@ -259,6 +271,8 @@ def run_training_cycle(
     player: Any,
     mechanics: MechanicsAPI,
 ) -> dict[str, Any]:
+    from psai.app import main as app_main
+
     log_path = Path(config.log_path)
     artifact_dir = Path(config.artifact_dir)
     checkpoints_dir = artifact_dir / "checkpoints"
@@ -271,7 +285,14 @@ def run_training_cycle(
 
     records = read_log_records(log_path)
     bootstrap_result: dict[str, Any] | None = None
+    if config.verbose:
+        print(
+            f"[loop] start log_path={log_path} artifact_dir={artifact_dir} "
+            f"existing_records={len(records)} max_cycles={config.max_cycles}"
+        )
     if not records and config.bootstrap_decisions > 0:
+        if config.verbose:
+            print(f"[loop] bootstrap heuristic collection target={config.bootstrap_decisions}")
         bootstrap_result = app_main.run_heuristic_training_battle(
             player,
             mechanics=mechanics,
@@ -279,8 +300,14 @@ def run_training_cycle(
             log_path=log_path,
             cycle_id=0,
             n_games=config.collection_n_games,
+            verbose=config.verbose,
+            print_every_decisions=config.print_every_decisions,
+            print_top_k=config.print_top_k,
+            print_turn_suggestions=config.print_turn_suggestions,
         )
         records = read_log_records(log_path)
+        if config.verbose:
+            print(f"[loop] bootstrap complete records={len(records)}")
 
     if not records:
         raise ValueError("No training records available after bootstrap stage.")
@@ -304,7 +331,11 @@ def run_training_cycle(
     status = "completed"
 
     for cycle_id in range(1, int(config.max_cycles) + 1):
+        if config.verbose:
+            print(f"[loop] cycle {cycle_id}/{config.max_cycles} begin")
         if config.heuristic_refresh_decisions > 0:
+            if config.verbose:
+                print(f"[loop] heuristic refresh target={config.heuristic_refresh_decisions}")
             app_main.run_heuristic_training_battle(
                 player,
                 mechanics=mechanics,
@@ -312,17 +343,31 @@ def run_training_cycle(
                 log_path=log_path,
                 cycle_id=cycle_id,
                 n_games=config.collection_n_games,
+                verbose=config.verbose,
+                print_every_decisions=config.print_every_decisions,
+                print_top_k=config.print_top_k,
+                print_turn_suggestions=config.print_turn_suggestions,
             )
 
         records = read_log_records(log_path)
         if not records:
             raise ValueError("Training data unexpectedly missing before model training.")
+        if config.verbose:
+            print(f"[loop] training model on records={len(records)}")
 
         checkpoint_path = checkpoints_dir / f"policy_value_cycle_{cycle_id:04d}.pt"
         cycle_train_config = replace(config.train_config, checkpoint_path=str(checkpoint_path))
         train_result = train_policy_value(model, records, config=cycle_train_config)
+        if config.verbose:
+            metrics = train_result["metrics"]
+            print(
+                f"[loop] cycle={cycle_id} train_complete "
+                f"last_total_loss={metrics['total_loss'][-1]:.4f} checkpoint={checkpoint_path}"
+            )
 
         model_bonus = build_model_bonus_fn(model, weight=config.model_bonus_weight)
+        if config.verbose:
+            print(f"[loop] model self-play collection target={config.model_cycle_decisions}")
         model_collection = app_main.run_model_training_battle(
             player,
             mechanics=mechanics,
@@ -332,11 +377,17 @@ def run_training_cycle(
             model=model_bonus,
             model_checkpoint=str(checkpoint_path),
             n_games=config.collection_n_games,
+            verbose=config.verbose,
+            print_every_decisions=config.print_every_decisions,
+            print_top_k=config.print_top_k,
+            print_turn_suggestions=config.print_turn_suggestions,
         )
 
         if config.eval_games <= 0:
             evaluation = {"games": 0, "wins": 0, "losses": 0, "ties": 0, "win_rate": 0.0}
         else:
+            if config.verbose:
+                print(f"[loop] evaluation start games={config.eval_games}")
             reset_fn = getattr(player, "reset_battles", None)
             if callable(reset_fn):
                 try:
@@ -351,7 +402,7 @@ def run_training_cycle(
             losses = 0
             ties = 0
             counted_tags: set[str] = set()
-            last_prompted_turn: dict[str, int] = {}
+            last_prompted_request: dict[str, tuple[Any, ...]] = {}
 
             while True:
                 if runner is not None and runner.done:
@@ -371,7 +422,16 @@ def run_training_cycle(
                         ties += 1
                     counted_tags.add(battle_tag)
                     games_finished += 1
-                    last_prompted_turn.pop(battle_tag, None)
+                    last_prompted_request.pop(battle_tag, None)
+                    if (
+                        config.verbose
+                        and config.eval_print_every_games > 0
+                        and games_finished % int(config.eval_print_every_games) == 0
+                    ):
+                        print(
+                            f"[eval] games={games_finished}/{config.eval_games} "
+                            f"wins={wins} losses={losses} ties={ties}"
+                        )
 
                 active_battles = [battle for battle in battles.values() if not getattr(battle, "finished", False)]
                 if runner is None and not active_battles and games_launched < config.eval_games:
@@ -380,47 +440,34 @@ def run_training_cycle(
 
                 for battle in active_battles:
                     battle_tag = str(getattr(battle, "battle_tag", id(battle)))
-                    can_choose = bool(
-                        getattr(battle, "available_moves", None) or getattr(battle, "available_switches", None)
-                    )
-                    if not can_choose:
-                        continue
-
-                    current_turn = int(getattr(battle, "turn", 0) or 0)
-                    if last_prompted_turn.get(battle_tag) == current_turn:
+                    request_signature = app_main._battle_request_signature(battle)
+                    if last_prompted_request.get(battle_tag) == request_signature:
                         continue
 
                     state = parse_battle_to_state(battle)
-                    turn_suggestions = app_main.get_turn_suggestions(
-                        state,
-                        mechanics,
-                        top_k=1,
-                        model=model_bonus,
+                    if not app_main._has_actionable_request(state, battle):
+                        continue
+
+                    turn_suggestions = (
+                        app_main.get_turn_suggestions(
+                            state,
+                            mechanics,
+                            top_k=1,
+                            model=model_bonus,
+                        )
+                        if state.legal_actions
+                        else []
                     )
-                    if turn_suggestions:
-                        best_action = turn_suggestions[0].action
-                        if best_action.is_switch:
-                            selected_switch = (
-                                best_action.raw_move
-                                if best_action.raw_move is not None
-                                else list(battle.available_switches)[0]
-                            )
-                            chosen_order = player.create_order(selected_switch)
-                        else:
-                            selected_move = (
-                                best_action.raw_move
-                                if best_action.raw_move is not None
-                                else list(battle.available_moves)[0]
-                            )
-                            chosen_order = player.create_order(selected_move)
-                    elif battle.available_moves:
-                        chosen_order = player.create_order(list(battle.available_moves)[0])
-                    else:
-                        chosen_order = player.create_order(list(battle.available_switches)[0])
+                    chosen_order, _chosen_action_id = app_main._choose_order_for_request(
+                        player,
+                        battle,
+                        state,
+                        turn_suggestions,
+                    )
 
                     if hasattr(player, "set_pending_order"):
                         player.set_pending_order(battle_tag, chosen_order)
-                    last_prompted_turn[battle_tag] = current_turn
+                    last_prompted_request[battle_tag] = request_signature
 
                 if games_finished >= config.eval_games and not active_battles and runner is None:
                     break
@@ -434,6 +481,12 @@ def run_training_cycle(
                 "ties": int(ties),
                 "win_rate": float(wins / games_finished) if games_finished > 0 else 0.0,
             }
+            if config.verbose:
+                print(
+                    f"[eval] complete games={evaluation['games']} wins={evaluation['wins']} "
+                    f"losses={evaluation['losses']} ties={evaluation['ties']} "
+                    f"win_rate={evaluation['win_rate']:.3f}"
+                )
 
         gate_passed = evaluation["win_rate"] >= float(config.eval_min_win_rate)
         cycle_report = {
@@ -447,6 +500,11 @@ def run_training_cycle(
         }
         cycle_reports.append(cycle_report)
         _write_json(metrics_dir / f"cycle_{cycle_id:04d}.json", cycle_report)
+        if config.verbose:
+            print(
+                f"[loop] cycle={cycle_id} gate={'pass' if gate_passed else 'fail'} "
+                f"threshold={config.eval_min_win_rate:.3f} win_rate={evaluation['win_rate']:.3f}"
+            )
 
         if gate_passed and evaluation["win_rate"] >= best_win_rate:
             best_win_rate = float(evaluation["win_rate"])

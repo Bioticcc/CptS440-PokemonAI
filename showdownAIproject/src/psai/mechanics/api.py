@@ -80,6 +80,30 @@ def _status_is(status_value: str | None, *names: str) -> bool:
     return lowered in {name.lower() for name in names}
 
 
+def _is_status_category_action(action: LegalAction) -> bool:
+
+    if action.is_switch:
+        return False
+    raw_move = getattr(action, "raw_move", None)
+    if raw_move is not None:
+        category = getattr(raw_move, "category", None)
+        category_name = getattr(category, "name", None)
+        if str(category_name or category or "").lower() == "status":
+            return True
+
+    damage_class = getattr(action, "damage_class", None)
+    if str(damage_class or "").lower() == "status":
+        return True
+
+    base_power = getattr(action, "base_power", None)
+    try:
+        if base_power is not None and int(base_power) <= 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return False
+
+
 def _stage_multiplier(stage: int) -> float:
 
     # Weird pokemon thing, stages. So essentially based on what the stat modifier is, like speed +2,
@@ -257,7 +281,7 @@ def get_expected_damage_to_opponent(state: State, action: LegalAction) -> float:
     # Use poke-env gen1-2 damage calc here.
     # Return expected damage dealt by this action, using all of our helpers above.
 
-    if action.is_switch:
+    if action.is_switch or _is_status_category_action(action):
         return 0.0
 
     min_roll, max_roll, rolls = _calculate_damage_rolls(state, action, attacker_is_friendly=True)
@@ -302,7 +326,7 @@ def get_ko_probability_to_opponent(state: State, action: LegalAction) -> float:
 
     # Use damage rolls + opponent HP to estimate KO chance.
 
-    if action.is_switch:
+    if action.is_switch or _is_status_category_action(action):
         return 0.0
 
     min_roll, max_roll, rolls = _calculate_damage_rolls(state, action, attacker_is_friendly=True)
@@ -387,7 +411,7 @@ def get_type_effectiveness(state: State, action: LegalAction) -> float:
 
     # Compute type multiplier from move type vs opponent type/types.
 
-    if action.is_switch:
+    if action.is_switch or _is_status_category_action(action):
         return 1.0
 
     defender = getattr(state.opponent_active, "raw_pokemon", None)

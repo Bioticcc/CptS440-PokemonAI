@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 from poke_env import AccountConfiguration, ShowdownServerConfiguration
+from poke_env.battle.pokemon import Pokemon
 from poke_env.player import Player
 
 from psai.decision.chooser import ModelBonusFn, MoveSuggestion, choose_actions
@@ -20,6 +21,66 @@ from psai.domain.state import State, parse_battle_to_state
 from psai.mechanics.api import MechanicsAPI
 from psai.training.dataset import make_log_record, write_log_record
 from psai.training.train import TrainingLoopConfig, run_training_cycle
+
+
+_ORIGINAL_AVAILABLE_MOVES_FROM_REQUEST = Pokemon.available_moves_from_request
+
+
+def _request_move_ids_from_request(request: dict[str, Any] | None) -> tuple[str, ...]:
+    if not isinstance(request, dict):
+        return ()
+
+    active_payload = request.get("active")
+    if not isinstance(active_payload, list) or not active_payload:
+        return ()
+
+    first_active = active_payload[0]
+    if not isinstance(first_active, dict):
+        return ()
+
+    moves_payload = first_active.get("moves", [])
+    if not isinstance(moves_payload, list):
+        return ()
+
+    move_ids: list[str] = []
+    for move_payload in moves_payload:
+        if not isinstance(move_payload, dict):
+            continue
+        if move_payload.get("disabled", False):
+            continue
+        move_id = move_payload.get("id")
+        if move_id is None:
+            move_id = move_payload.get("move")
+        if move_id is None:
+            continue
+
+        normalized = str(move_id).strip().lower().replace(" ", "")
+        if normalized:
+            move_ids.append(normalized)
+
+    return tuple(move_ids)
+
+
+def _install_poke_env_move_request_fallback() -> None:
+    current_impl = Pokemon.available_moves_from_request
+    if getattr(current_impl, "__name__", "") == "_psai_available_moves_from_request":
+        return
+
+    def _psai_available_moves_from_request(self: Any, request: dict[str, Any]) -> list[Any]:
+        try:
+            return _ORIGINAL_AVAILABLE_MOVES_FROM_REQUEST(self, request)
+        except AssertionError:
+            # Some Gen1 ladder requests include pseudo move ids (e.g. "fight")
+            # that trigger poke-env assertions. Fallback to request-confirmed moves only.
+            move_lookup = dict(getattr(self, "moves", {}) or {})
+            request_move_ids = _request_move_ids_from_request(request)
+            fallback_moves = [move_lookup[move_id] for move_id in request_move_ids if move_id in move_lookup]
+            return fallback_moves
+
+    Pokemon.available_moves_from_request = _psai_available_moves_from_request
+
+
+_install_poke_env_move_request_fallback()
 
 
 class AsyncConnectionRunner:
@@ -97,16 +158,20 @@ class pokeEnvPlayerInfo(Player):
         battle_format: str = "gen1randombattle",
         team: str | None = None,
     ) -> None:
-        self.username = username
-        self.password = password
-        self.battle_format = battle_format
-        self.team = team
+        if battle_format != "gen1randombattle":
+            raise ValueError("Only gen1randombattle is supported in the current ladder runner.")
+
+        self._configured_username = username
+        self._configured_password = password
+        self._configured_battle_format = battle_format
+        self._configured_team = team
 
         account_configuration = AccountConfiguration(username, password)
         player_kwargs: dict[str, Any] = {
             "account_configuration": account_configuration,
             "server_configuration": ShowdownServerConfiguration,
             "battle_format": battle_format,
+            "strict_battle_tracking": False,
         }
         if team:
             player_kwargs["team"] = team
@@ -175,8 +240,7 @@ def send_confirmed_move(player: Any, battle: Any, chosen_action: Any) -> Any:
     action_index = int(chosen_action["index"])
 
     if action_kind == "attack":
-        selected_move = list(battle.available_moves)[action_index - 1]
-        return player.create_order(selected_move)
+        return player.create_order(f"/choose move {action_index}")
 
     selected_switch = list(battle.available_switches)[action_index - 1]
     return player.create_order(selected_switch)
@@ -203,6 +267,196 @@ def _battle_outcome_value(battle: Any) -> tuple[float, str]:
 
 def _launch_single_game(player: Any) -> AsyncConnectionRunner:
     return AsyncConnectionRunner(player, 1).start()
+
+
+def _choice_object_id(choice: Any) -> str:
+    return str(
+        getattr(choice, "id", None)
+        or getattr(choice, "move", None)
+        or getattr(choice, "species", None)
+        or getattr(choice, "name", None)
+        or repr(choice)
+    )
+
+
+def _battle_request_signature(battle: Any) -> tuple[Any, ...]:
+    turn = int(getattr(battle, "turn", 0) or 0)
+    available_moves = list(getattr(battle, "available_moves", []) or [])
+    available_switches = list(getattr(battle, "available_switches", []) or [])
+    move_ids = tuple(_choice_object_id(move) for move in available_moves)
+    switch_ids = tuple(_choice_object_id(switch_option) for switch_option in available_switches)
+
+    force_switch_raw = getattr(battle, "force_switch", False)
+    if isinstance(force_switch_raw, (list, tuple)):
+        force_switch = tuple(bool(value) for value in force_switch_raw)
+    else:
+        force_switch = bool(force_switch_raw)
+
+    request_payload = getattr(battle, "_last_request", None)
+    request_wait = bool(request_payload.get("wait", False)) if isinstance(request_payload, dict) else False
+    request_move_ids = _request_move_ids_from_request(request_payload if isinstance(request_payload, dict) else None)
+
+    return (turn, move_ids, switch_ids, force_switch, request_wait, request_move_ids)
+
+
+def _move_action_id_from_move(move: Any) -> str:
+    return str(getattr(move, "id", None) or getattr(move, "move", None) or "fallback_move")
+
+
+def _switch_action_id_from_target(target: Any) -> str:
+    identifier = str(
+        getattr(target, "identifier", None)
+        or getattr(target, "species", None)
+        or getattr(target, "name", None)
+        or "fallback"
+    )
+    return f"switch:{identifier}"
+
+
+def _default_order(player: Any) -> Any:
+    choose_default = getattr(player, "choose_default_move", None)
+    if callable(choose_default):
+        return choose_default()
+    return player.create_order("/choose default")
+
+
+def _select_move_slot(available_moves: list[Any], best_action: Any | None) -> int | None:
+    if not available_moves:
+        return None
+    if best_action is None or bool(getattr(best_action, "is_switch", False)):
+        return 1
+
+    raw_move = getattr(best_action, "raw_move", None)
+    if raw_move is not None:
+        for index, candidate in enumerate(available_moves, start=1):
+            if candidate is raw_move:
+                return index
+
+    action_id = str(getattr(best_action, "action_id", "") or "")
+    if action_id:
+        for index, candidate in enumerate(available_moves, start=1):
+            if _move_action_id_from_move(candidate) == action_id:
+                return index
+
+    return 1
+
+
+def _select_switch_target(available_switches: list[Any], best_action: Any | None) -> Any | None:
+    if not available_switches:
+        return None
+    if best_action is None:
+        return available_switches[0]
+    if not bool(getattr(best_action, "is_switch", False)):
+        return available_switches[0]
+
+    raw_switch = getattr(best_action, "raw_move", None)
+    if raw_switch is not None:
+        for candidate in available_switches:
+            if candidate is raw_switch:
+                return candidate
+
+    action_id = str(getattr(best_action, "action_id", "") or "")
+    if action_id:
+        for candidate in available_switches:
+            if _switch_action_id_from_target(candidate) == action_id:
+                return candidate
+
+    return available_switches[0]
+
+
+def _has_actionable_request(state: State, battle: Any) -> bool:
+    if state.request_mode == "wait":
+        return False
+    if state.legal_actions:
+        return True
+
+    request_payload = getattr(battle, "_last_request", None)
+    if not isinstance(request_payload, dict):
+        return False
+    if bool(request_payload.get("wait", False)):
+        return False
+    return True
+
+
+def _choose_order_for_request(
+    player: Any,
+    battle: Any,
+    state: State,
+    turn_suggestions: list[MoveSuggestion],
+) -> tuple[Any, str]:
+    available_moves = list(getattr(battle, "available_moves", []) or [])
+    available_switches = list(getattr(battle, "available_switches", []) or [])
+    best_action = turn_suggestions[0].action if turn_suggestions else None
+    mode = state.request_mode
+
+    if mode in {"forced_switch", "switch_only"}:
+        selected_switch = _select_switch_target(available_switches, best_action)
+        if selected_switch is not None:
+            return player.create_order(selected_switch), _switch_action_id_from_target(selected_switch)
+        return _default_order(player), "default"
+
+    if mode in {"team_preview", "wait"}:
+        return _default_order(player), "default"
+
+    if mode == "move_or_switch" and best_action is not None and bool(getattr(best_action, "is_switch", False)):
+        selected_switch = _select_switch_target(available_switches, best_action)
+        if selected_switch is not None:
+            return player.create_order(selected_switch), _switch_action_id_from_target(selected_switch)
+
+    selected_slot = _select_move_slot(available_moves, best_action)
+    if selected_slot is not None:
+        selected_move = available_moves[selected_slot - 1]
+        return player.create_order(f"/choose move {selected_slot}"), _move_action_id_from_move(selected_move)
+
+    selected_switch = _select_switch_target(available_switches, best_action)
+    if selected_switch is not None:
+        return player.create_order(selected_switch), _switch_action_id_from_target(selected_switch)
+
+    return _default_order(player), "default"
+
+
+def _print_turn_suggestions(
+    phase_label: str,
+    battle_tag: str,
+    state: State,
+    turn_suggestions: list[MoveSuggestion],
+    chosen_action_id: str,
+    *,
+    max_suggestions: int,
+) -> None:
+    turn_value = state.turn_number if state.turn_number is not None else state.turn
+    print(
+        f"[{phase_label}] battle={battle_tag} turn={turn_value} mode={state.request_mode} "
+        f"legal={len(state.legal_actions)} chosen={chosen_action_id}"
+    )
+
+    if not turn_suggestions:
+        print(f"[{phase_label}] no ranked suggestions for this request")
+        return
+
+    for suggestion in turn_suggestions[: max(0, max_suggestions)]:
+        print(
+            f"[{phase_label}]   #{suggestion.rank} {suggestion.action.action_id} "
+            f"score={suggestion.score:.2f}"
+        )
+        if suggestion.reasons:
+            print(f"[{phase_label}]      reasons: {'; '.join(suggestion.reasons)}")
+
+
+def _print_collection_progress(
+    phase_label: str,
+    *,
+    cycle_id: int,
+    decisions_collected: int,
+    decision_budget: int,
+    decisions_played: int,
+    battles_launched: int,
+    battles_finished: int,
+) -> None:
+    print(
+        f"[{phase_label}] cycle={cycle_id} decisions={decisions_collected}/{decision_budget} "
+        f"played={decisions_played} battles={battles_finished}/{battles_launched}"
+    )
 
 
 def run_battle(
@@ -258,6 +512,9 @@ def run_test_battle(
     top_k: int = 1,
     max_turns: int | None = None,
     n_games: int | None = 1,
+    verbose: bool = True,
+    print_turn_suggestions: bool = True,
+    print_top_k: int | None = None,
 ) -> None:
 
     # Ladder connectivity smoke test:
@@ -267,10 +524,15 @@ def run_test_battle(
     _safe_reset_battles(player)
     resolved_mechanics = mechanics or MechanicsAPI()
     runner = AsyncConnectionRunner(player, n_games).start()
+    resolved_print_top_k = int(print_top_k if print_top_k is not None else top_k)
 
     turns_ran = 0
-    last_prompted_turn: dict[str, int] = {}
+    last_prompted_request: dict[str, tuple[Any, ...]] = {}
     finished_tags: set[str] = set()
+    seen_tags: set[str] = set()
+
+    if verbose:
+        print(f"[test] start n_games={n_games} top_k={top_k} max_turns={max_turns}")
 
     while True:
         if runner.done:
@@ -282,61 +544,72 @@ def run_test_battle(
             if getattr(battle, "finished", False):
                 if battle_tag not in finished_tags:
                     finished_tags.add(battle_tag)
-                last_prompted_turn.pop(str(battle_tag), None)
+                    if verbose:
+                        outcome_value, battle_result = _battle_outcome_value(battle)
+                        del outcome_value
+                        print(f"[test] battle_finished tag={battle_tag} result={battle_result}")
+                last_prompted_request.pop(str(battle_tag), None)
                 continue
             active_battles.append(battle)
 
         for battle in active_battles:
             battle_tag = str(getattr(battle, "battle_tag", id(battle)))
-            can_choose = bool(getattr(battle, "available_moves", None) or getattr(battle, "available_switches", None))
-            if not can_choose:
-                continue
-
-            current_turn = int(getattr(battle, "turn", 0) or 0)
-            if last_prompted_turn.get(battle_tag) == current_turn:
+            if battle_tag not in seen_tags:
+                seen_tags.add(battle_tag)
+                if verbose:
+                    print(f"[test] battle_started tag={battle_tag}")
+            request_signature = _battle_request_signature(battle)
+            if last_prompted_request.get(battle_tag) == request_signature:
                 continue
 
             state = parse_battle_to_state(battle)
-            turn_suggestions = get_turn_suggestions(
+            if not _has_actionable_request(state, battle):
+                continue
+
+            turn_suggestions = (
+                get_turn_suggestions(
+                    state,
+                    resolved_mechanics,
+                    top_k=top_k,
+                    model=None,
+                )
+                if state.legal_actions
+                else []
+            )
+            chosen_order, _chosen_action_id = _choose_order_for_request(
+                player,
+                battle,
                 state,
-                resolved_mechanics,
-                top_k=top_k,
-                model=None,
+                turn_suggestions,
             )
 
-            if turn_suggestions:
-                best_action = turn_suggestions[0].action
-                if best_action.is_switch:
-                    selected_switch = (
-                        best_action.raw_move
-                        if best_action.raw_move is not None
-                        else list(battle.available_switches)[0]
-                    )
-                    chosen_order = player.create_order(selected_switch)
-                else:
-                    selected_move = (
-                        best_action.raw_move
-                        if best_action.raw_move is not None
-                        else list(battle.available_moves)[0]
-                    )
-                    chosen_order = player.create_order(selected_move)
-            elif battle.available_moves:
-                chosen_order = player.create_order(list(battle.available_moves)[0])
-            else:
-                chosen_order = player.create_order(list(battle.available_switches)[0])
+            if verbose and print_turn_suggestions:
+                _print_turn_suggestions(
+                    "test",
+                    battle_tag,
+                    state,
+                    turn_suggestions,
+                    _chosen_action_id,
+                    max_suggestions=resolved_print_top_k,
+                )
 
             if hasattr(player, "set_pending_order"):
                 player.set_pending_order(battle_tag, chosen_order)
-            last_prompted_turn[battle_tag] = current_turn
+            last_prompted_request[battle_tag] = request_signature
             turns_ran += 1
 
             if max_turns is not None and turns_ran >= max_turns:
+                if verbose:
+                    print(f"[test] reached max_turns={max_turns}, stopping")
                 return
 
         if runner.done and not active_battles:
             break
 
         time.sleep(0.1)
+
+    if verbose:
+        print(f"[test] complete turns={turns_ran} battles_finished={len(finished_tags)}")
 
 
 def run_heuristic_training_battle(
@@ -349,9 +622,14 @@ def run_heuristic_training_battle(
     log_path: str | Path = "training/battle_logs.jsonl",
     cycle_id: int = 0,
     n_games: int | None = None,
+    verbose: bool = True,
+    print_every_decisions: int = 100,
+    print_top_k: int | None = None,
+    print_turn_suggestions: bool = True,
 ) -> dict[str, Any]:
 
     resolved_budget = int(decision_budget if decision_budget is not None else (max_turns or 1000))
+    resolved_print_top_k = int(print_top_k if print_top_k is not None else top_k)
     if resolved_budget <= 0:
         return {
             "source": "heuristic",
@@ -367,6 +645,12 @@ def run_heuristic_training_battle(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     _safe_reset_battles(player)
 
+    if verbose:
+        print(
+            f"[heuristic] start cycle={cycle_id} decision_budget={resolved_budget} "
+            f"log_path={output_path}"
+        )
+
     runner: AsyncConnectionRunner | None = None
     battles_launched = 0
     battles_finished = 0
@@ -375,7 +659,7 @@ def run_heuristic_training_battle(
 
     pending_by_battle: dict[str, list[tuple[State, str]]] = {}
     finished_tags: set[str] = set()
-    last_prompted_turn: dict[str, int] = {}
+    last_prompted_request: dict[str, tuple[Any, ...]] = {}
 
     while True:
         if runner is not None and runner.done:
@@ -385,11 +669,12 @@ def run_heuristic_training_battle(
         battles = dict(getattr(player, "battles", {}) or {})
 
         for battle_tag, battle in battles.items():
-            if not getattr(battle, "finished", False) or battle_tag in finished_tags:
+            battle_tag_str = str(battle_tag)
+            if not getattr(battle, "finished", False) or battle_tag_str in finished_tags:
                 continue
 
             outcome_value, battle_result = _battle_outcome_value(battle)
-            buffered = pending_by_battle.pop(battle_tag, [])
+            buffered = pending_by_battle.pop(battle_tag_str, [])
             for state, chosen_action_id in buffered:
                 record = make_log_record(
                     state,
@@ -403,9 +688,14 @@ def run_heuristic_training_battle(
                 )
                 write_log_record(output_path, record)
 
-            finished_tags.add(battle_tag)
-            last_prompted_turn.pop(battle_tag, None)
+            finished_tags.add(battle_tag_str)
+            last_prompted_request.pop(battle_tag_str, None)
             battles_finished += 1
+            if verbose:
+                print(
+                    f"[heuristic] battle_finished tag={battle_tag_str} result={battle_result} "
+                    f"buffered_decisions={len(buffered)}"
+                )
 
         active_battles = [battle for battle in battles.values() if not getattr(battle, "finished", False)]
         can_launch_more = decisions_collected < resolved_budget and (
@@ -415,55 +705,67 @@ def run_heuristic_training_battle(
         if runner is None and not active_battles and can_launch_more:
             runner = _launch_single_game(player)
             battles_launched += 1
+            if verbose:
+                print(f"[heuristic] launched ladder game #{battles_launched}")
 
         for battle in active_battles:
             battle_tag = str(getattr(battle, "battle_tag", id(battle)))
-            can_choose = bool(getattr(battle, "available_moves", None) or getattr(battle, "available_switches", None))
-            if not can_choose:
-                continue
-
-            current_turn = int(getattr(battle, "turn", 0) or 0)
-            if last_prompted_turn.get(battle_tag) == current_turn:
+            request_signature = _battle_request_signature(battle)
+            if last_prompted_request.get(battle_tag) == request_signature:
                 continue
 
             state = parse_battle_to_state(battle)
-            turn_suggestions = get_turn_suggestions(state, mechanics, top_k=top_k, model=None)
+            if not _has_actionable_request(state, battle):
+                continue
 
-            if turn_suggestions:
-                best_action = turn_suggestions[0].action
-                chosen_action_id = best_action.action_id
-                if best_action.is_switch:
-                    selected_switch = (
-                        best_action.raw_move
-                        if best_action.raw_move is not None
-                        else list(battle.available_switches)[0]
-                    )
-                    chosen_order = player.create_order(selected_switch)
-                else:
-                    selected_move = (
-                        best_action.raw_move
-                        if best_action.raw_move is not None
-                        else list(battle.available_moves)[0]
-                    )
-                    chosen_order = player.create_order(selected_move)
-            elif battle.available_moves:
-                fallback_move = list(battle.available_moves)[0]
-                chosen_order = player.create_order(fallback_move)
-                chosen_action_id = str(getattr(fallback_move, "id", "fallback_move"))
-            else:
-                fallback_switch = list(battle.available_switches)[0]
-                chosen_order = player.create_order(fallback_switch)
-                chosen_action_id = f"switch:{getattr(fallback_switch, 'species', 'fallback')}"
+            turn_suggestions = (
+                get_turn_suggestions(state, mechanics, top_k=top_k, model=None)
+                if state.legal_actions
+                else []
+            )
+            chosen_order, chosen_action_id = _choose_order_for_request(
+                player,
+                battle,
+                state,
+                turn_suggestions,
+            )
+
+            if verbose and print_turn_suggestions:
+                _print_turn_suggestions(
+                    "heuristic",
+                    battle_tag,
+                    state,
+                    turn_suggestions,
+                    chosen_action_id,
+                    max_suggestions=resolved_print_top_k,
+                )
 
             if hasattr(player, "set_pending_order"):
                 player.set_pending_order(battle_tag, chosen_order)
 
-            if decisions_collected < resolved_budget:
+            should_log_decision = bool(state.legal_actions) and chosen_action_id != "default"
+            if should_log_decision and decisions_collected < resolved_budget:
                 pending_by_battle.setdefault(battle_tag, []).append((state, chosen_action_id))
                 decisions_collected += 1
 
-            decisions_played += 1
-            last_prompted_turn[battle_tag] = current_turn
+            if should_log_decision:
+                decisions_played += 1
+            last_prompted_request[battle_tag] = request_signature
+            if (
+                verbose
+                and should_log_decision
+                and print_every_decisions > 0
+                and decisions_collected % int(print_every_decisions) == 0
+            ):
+                _print_collection_progress(
+                    "heuristic",
+                    cycle_id=int(cycle_id),
+                    decisions_collected=int(decisions_collected),
+                    decision_budget=int(resolved_budget),
+                    decisions_played=int(decisions_played),
+                    battles_launched=int(battles_launched),
+                    battles_finished=int(battles_finished),
+                )
 
         if (
             decisions_collected >= resolved_budget
@@ -493,6 +795,17 @@ def run_heuristic_training_battle(
             write_log_record(output_path, record)
         pending_by_battle.pop(battle_tag, None)
 
+    if verbose:
+        _print_collection_progress(
+            "heuristic",
+            cycle_id=int(cycle_id),
+            decisions_collected=int(decisions_collected),
+            decision_budget=int(resolved_budget),
+            decisions_played=int(decisions_played),
+            battles_launched=int(battles_launched),
+            battles_finished=int(battles_finished),
+        )
+
     return {
         "source": "heuristic",
         "cycle_id": cycle_id,
@@ -516,9 +829,14 @@ def run_model_training_battle(
     cycle_id: int = 1,
     model_checkpoint: str | None = None,
     n_games: int | None = None,
+    verbose: bool = True,
+    print_every_decisions: int = 100,
+    print_top_k: int | None = None,
+    print_turn_suggestions: bool = True,
 ) -> dict[str, Any]:
 
     resolved_budget = int(decision_budget if decision_budget is not None else (max_turns or 1000))
+    resolved_print_top_k = int(print_top_k if print_top_k is not None else top_k)
     if resolved_budget <= 0:
         return {
             "source": "model",
@@ -534,6 +852,12 @@ def run_model_training_battle(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     _safe_reset_battles(player)
 
+    if verbose:
+        print(
+            f"[model] start cycle={cycle_id} decision_budget={resolved_budget} "
+            f"log_path={output_path} checkpoint={model_checkpoint}"
+        )
+
     runner: AsyncConnectionRunner | None = None
     battles_launched = 0
     battles_finished = 0
@@ -542,7 +866,7 @@ def run_model_training_battle(
 
     pending_by_battle: dict[str, list[tuple[State, str]]] = {}
     finished_tags: set[str] = set()
-    last_prompted_turn: dict[str, int] = {}
+    last_prompted_request: dict[str, tuple[Any, ...]] = {}
 
     while True:
         if runner is not None and runner.done:
@@ -552,11 +876,12 @@ def run_model_training_battle(
         battles = dict(getattr(player, "battles", {}) or {})
 
         for battle_tag, battle in battles.items():
-            if not getattr(battle, "finished", False) or battle_tag in finished_tags:
+            battle_tag_str = str(battle_tag)
+            if not getattr(battle, "finished", False) or battle_tag_str in finished_tags:
                 continue
 
             outcome_value, battle_result = _battle_outcome_value(battle)
-            buffered = pending_by_battle.pop(battle_tag, [])
+            buffered = pending_by_battle.pop(battle_tag_str, [])
             for state, chosen_action_id in buffered:
                 metadata: dict[str, Any] = {
                     "source": "model",
@@ -573,9 +898,14 @@ def run_model_training_battle(
                 )
                 write_log_record(output_path, record)
 
-            finished_tags.add(battle_tag)
-            last_prompted_turn.pop(battle_tag, None)
+            finished_tags.add(battle_tag_str)
+            last_prompted_request.pop(battle_tag_str, None)
             battles_finished += 1
+            if verbose:
+                print(
+                    f"[model] battle_finished tag={battle_tag_str} result={battle_result} "
+                    f"buffered_decisions={len(buffered)}"
+                )
 
         active_battles = [battle for battle in battles.values() if not getattr(battle, "finished", False)]
         can_launch_more = decisions_collected < resolved_budget and (
@@ -585,55 +915,67 @@ def run_model_training_battle(
         if runner is None and not active_battles and can_launch_more:
             runner = _launch_single_game(player)
             battles_launched += 1
+            if verbose:
+                print(f"[model] launched ladder game #{battles_launched}")
 
         for battle in active_battles:
             battle_tag = str(getattr(battle, "battle_tag", id(battle)))
-            can_choose = bool(getattr(battle, "available_moves", None) or getattr(battle, "available_switches", None))
-            if not can_choose:
-                continue
-
-            current_turn = int(getattr(battle, "turn", 0) or 0)
-            if last_prompted_turn.get(battle_tag) == current_turn:
+            request_signature = _battle_request_signature(battle)
+            if last_prompted_request.get(battle_tag) == request_signature:
                 continue
 
             state = parse_battle_to_state(battle)
-            turn_suggestions = get_turn_suggestions(state, mechanics, top_k=top_k, model=model)
+            if not _has_actionable_request(state, battle):
+                continue
 
-            if turn_suggestions:
-                best_action = turn_suggestions[0].action
-                chosen_action_id = best_action.action_id
-                if best_action.is_switch:
-                    selected_switch = (
-                        best_action.raw_move
-                        if best_action.raw_move is not None
-                        else list(battle.available_switches)[0]
-                    )
-                    chosen_order = player.create_order(selected_switch)
-                else:
-                    selected_move = (
-                        best_action.raw_move
-                        if best_action.raw_move is not None
-                        else list(battle.available_moves)[0]
-                    )
-                    chosen_order = player.create_order(selected_move)
-            elif battle.available_moves:
-                fallback_move = list(battle.available_moves)[0]
-                chosen_order = player.create_order(fallback_move)
-                chosen_action_id = str(getattr(fallback_move, "id", "fallback_move"))
-            else:
-                fallback_switch = list(battle.available_switches)[0]
-                chosen_order = player.create_order(fallback_switch)
-                chosen_action_id = f"switch:{getattr(fallback_switch, 'species', 'fallback')}"
+            turn_suggestions = (
+                get_turn_suggestions(state, mechanics, top_k=top_k, model=model)
+                if state.legal_actions
+                else []
+            )
+            chosen_order, chosen_action_id = _choose_order_for_request(
+                player,
+                battle,
+                state,
+                turn_suggestions,
+            )
+
+            if verbose and print_turn_suggestions:
+                _print_turn_suggestions(
+                    "model",
+                    battle_tag,
+                    state,
+                    turn_suggestions,
+                    chosen_action_id,
+                    max_suggestions=resolved_print_top_k,
+                )
 
             if hasattr(player, "set_pending_order"):
                 player.set_pending_order(battle_tag, chosen_order)
 
-            if decisions_collected < resolved_budget:
+            should_log_decision = bool(state.legal_actions) and chosen_action_id != "default"
+            if should_log_decision and decisions_collected < resolved_budget:
                 pending_by_battle.setdefault(battle_tag, []).append((state, chosen_action_id))
                 decisions_collected += 1
 
-            decisions_played += 1
-            last_prompted_turn[battle_tag] = current_turn
+            if should_log_decision:
+                decisions_played += 1
+            last_prompted_request[battle_tag] = request_signature
+            if (
+                verbose
+                and should_log_decision
+                and print_every_decisions > 0
+                and decisions_collected % int(print_every_decisions) == 0
+            ):
+                _print_collection_progress(
+                    "model",
+                    cycle_id=int(cycle_id),
+                    decisions_collected=int(decisions_collected),
+                    decision_budget=int(resolved_budget),
+                    decisions_played=int(decisions_played),
+                    battles_launched=int(battles_launched),
+                    battles_finished=int(battles_finished),
+                )
 
         if (
             decisions_collected >= resolved_budget
@@ -665,6 +1007,17 @@ def run_model_training_battle(
             )
             write_log_record(output_path, record)
         pending_by_battle.pop(battle_tag, None)
+
+    if verbose:
+        _print_collection_progress(
+            "model",
+            cycle_id=int(cycle_id),
+            decisions_collected=int(decisions_collected),
+            decision_budget=int(resolved_budget),
+            decisions_played=int(decisions_played),
+            battles_launched=int(battles_launched),
+            battles_finished=int(battles_finished),
+        )
 
     return {
         "source": "model",
@@ -736,7 +1089,7 @@ def main() -> int:
     # 5. After the cycle completes, we run eval to determine if the winrate is above the accenptable amount.
     # 6. If the eval fails, stop the loop and change training config in train.py.
     
-
+    """
     training_report = run_training_cycle(
         TrainingLoopConfig(
             log_path="training/battle_logs.jsonl",
@@ -751,7 +1104,7 @@ def main() -> int:
         player,
         mechanics,
     )
-    print(f"Training status: {training_report['status']}")
+    print(f"Training status: {training_report['status']}")"""
     # run_model_training_battle(player, mechanics=MechanicsAPI(), model=None, top_k=3, max_turns=100000)
 
     return 0
