@@ -405,9 +405,12 @@ def run_training_cycle(
             last_prompted_request: dict[str, tuple[Any, ...]] = {}
 
             while True:
-                if runner is not None and runner.done:
-                    runner.raise_if_failed()
-                    runner = None
+                runner = app_main._resolve_runner_state(
+                    runner,
+                    player=player,
+                    phase_label="eval",
+                    verbose=config.verbose,
+                )
 
                 battles = dict(getattr(player, "battles", {}) or {})
                 for battle_tag, battle in battles.items():
@@ -423,6 +426,12 @@ def run_training_cycle(
                     counted_tags.add(battle_tag)
                     games_finished += 1
                     last_prompted_request.pop(battle_tag, None)
+                    app_main._safe_cleanup_finished_battle(
+                        player,
+                        str(battle_tag),
+                        phase_label="eval",
+                        verbose=False,
+                    )
                     if (
                         config.verbose
                         and config.eval_print_every_games > 0

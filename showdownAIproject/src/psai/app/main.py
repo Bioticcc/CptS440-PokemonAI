@@ -14,6 +14,7 @@ from typing import Any
 
 from poke_env import AccountConfiguration, ShowdownServerConfiguration
 from poke_env.battle.pokemon import Pokemon
+from poke_env.concurrency import POKE_LOOP
 from poke_env.player import Player
 
 from psai.decision.chooser import ModelBonusFn, MoveSuggestion, choose_actions
@@ -148,6 +149,10 @@ class AsyncConnectionRunner:
     @property
     def done(self) -> bool:
         return self._done_event.is_set()
+
+    @property
+    def error(self) -> BaseException | None:
+        return self._error
 
     def raise_if_failed(self) -> None:
         if self._error is not None:
@@ -297,6 +302,134 @@ def _safe_reset_battles(player: Any) -> None:
         reset_fn()
     except Exception:
         return
+
+
+def _is_recoverable_connection_error(exc: BaseException | None) -> bool:
+    if exc is None:
+        return False
+    message = str(exc).lower()
+    markers = (
+        "keepalive ping timeout",
+        "connectionclosed",
+        "websocket",
+        "no close frame received",
+        "connection is closed",
+        "sent 1011",
+    )
+    return any(marker in message for marker in markers)
+
+
+def _safe_clear_all_battles(player: Any) -> None:
+    battle_map = getattr(player, "_battles", None)
+    if isinstance(battle_map, dict):
+        battle_map.clear()
+
+    pending_orders = getattr(player, "_pending_orders", None)
+    if isinstance(pending_orders, dict):
+        pending_orders.clear()
+
+
+def _safe_restart_showdown_listener(
+    player: Any,
+    *,
+    phase_label: str,
+    verbose: bool = False,
+) -> bool:
+    ps_client = getattr(player, "ps_client", None)
+    if ps_client is None:
+        return False
+
+    listening_future = getattr(ps_client, "_listening_coroutine", None)
+    if listening_future is not None:
+        try:
+            if not listening_future.done():
+                listening_future.cancel()
+        except Exception:
+            pass
+
+    try:
+        new_future = asyncio.run_coroutine_threadsafe(ps_client.listen(), POKE_LOOP)
+    except Exception as exc:
+        if verbose:
+            print(
+                f"[{phase_label}] reconnect_failed error={type(exc).__name__}: {exc}"
+            )
+        return False
+
+    try:
+        setattr(ps_client, "_listening_coroutine", new_future)
+    except Exception:
+        pass
+
+    if verbose:
+        print(f"[{phase_label}] reconnect_started")
+    time.sleep(1.0)
+    return True
+
+
+def _resolve_runner_state(
+    runner: AsyncConnectionRunner | None,
+    *,
+    player: Any,
+    phase_label: str,
+    verbose: bool = False,
+) -> AsyncConnectionRunner | None:
+    if runner is None or not runner.done:
+        return runner
+
+    runner_error = runner.error
+    if runner_error is None:
+        return None
+
+    if _is_recoverable_connection_error(runner_error):
+        if verbose:
+            print(
+                f"[{phase_label}] connection dropped "
+                f"({type(runner_error).__name__}: {runner_error}). Reconnecting."
+            )
+        _safe_clear_all_battles(player)
+        _safe_restart_showdown_listener(player, phase_label=phase_label, verbose=verbose)
+        return None
+
+    runner.raise_if_failed()
+    return None
+
+
+def _safe_cleanup_finished_battle(
+    player: Any,
+    battle_tag: str,
+    *,
+    phase_label: str | None = None,
+    verbose: bool = False,
+) -> None:
+    normalized_tag = str(battle_tag)
+
+    # Best effort: ask showdown to leave the room for this finished battle.
+    ps_client = getattr(player, "ps_client", None)
+    send_message = getattr(ps_client, "send_message", None)
+    websocket = getattr(ps_client, "websocket", None)
+    if websocket is not None and callable(send_message):
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                send_message(f"/leave {normalized_tag}"),
+                POKE_LOOP,
+            )
+            future.result(timeout=1.0)
+        except Exception:
+            pass
+
+    # Keep the in-memory tracker small during long runs.
+    for attr_name in ("_battles", "battles"):
+        battle_map = getattr(player, attr_name, None)
+        if isinstance(battle_map, dict):
+            battle_map.pop(normalized_tag, None)
+
+    pending_orders = getattr(player, "_pending_orders", None)
+    if isinstance(pending_orders, dict):
+        pending_orders.pop(normalized_tag, None)
+
+    if verbose and phase_label:
+        print(f"[{phase_label}] cleaned_up battle={normalized_tag}")
 
 
 def _battle_outcome_value(battle: Any) -> tuple[float, str]:
@@ -639,6 +772,7 @@ def run_test_battle(
     _safe_reset_battles(player)
     resolved_mechanics = mechanics or MechanicsAPI()
     runner = AsyncConnectionRunner(player, n_games).start()
+    target_games = int(n_games if n_games is not None else 1)
     resolved_print_top_k = int(print_top_k if print_top_k is not None else top_k)
 
     turns_ran = 0
@@ -650,8 +784,12 @@ def run_test_battle(
         print(f"[test] start n_games={n_games} top_k={top_k} max_turns={max_turns}")
 
     while True:
-        if runner.done:
-            runner.raise_if_failed()
+        runner = _resolve_runner_state(
+            runner,
+            player=player,
+            phase_label="test",
+            verbose=verbose,
+        )
 
         battles = dict(getattr(player, "battles", {}) or {})
         active_battles = []
@@ -663,6 +801,7 @@ def run_test_battle(
                         outcome_value, battle_result = _battle_outcome_value(battle)
                         del outcome_value
                         print(f"[test] battle_finished tag={battle_tag} result={battle_result}")
+                    _safe_cleanup_finished_battle(player, str(battle_tag), phase_label="test", verbose=verbose)
                 last_prompted_request.pop(str(battle_tag), None)
                 continue
             active_battles.append(battle)
@@ -730,8 +869,11 @@ def run_test_battle(
                     print(f"[test] reached max_turns={max_turns}, stopping")
                 return
 
-        if runner.done and not active_battles:
-            break
+        if runner is None and not active_battles:
+            if len(finished_tags) >= target_games:
+                break
+            remaining_games = max(1, target_games - len(finished_tags))
+            runner = AsyncConnectionRunner(player, remaining_games).start()
 
         time.sleep(0.1)
 
@@ -789,9 +931,12 @@ def run_heuristic_training_battle(
     last_prompted_request: dict[str, tuple[Any, ...]] = {}
 
     while True:
-        if runner is not None and runner.done:
-            runner.raise_if_failed()
-            runner = None
+        runner = _resolve_runner_state(
+            runner,
+            player=player,
+            phase_label="heuristic",
+            verbose=verbose,
+        )
 
         battles = dict(getattr(player, "battles", {}) or {})
 
@@ -824,6 +969,7 @@ def run_heuristic_training_battle(
                     f"[heuristic] battle_finished tag={battle_tag_str} result={battle_result} "
                     f"buffered_decisions={len(buffered)}"
                 )
+            _safe_cleanup_finished_battle(player, battle_tag_str, phase_label="heuristic", verbose=verbose)
 
         active_battles = [battle for battle in battles.values() if not getattr(battle, "finished", False)]
         can_launch_more = decisions_collected < resolved_budget and (
@@ -1009,9 +1155,12 @@ def run_model_training_battle(
     last_prompted_request: dict[str, tuple[Any, ...]] = {}
 
     while True:
-        if runner is not None and runner.done:
-            runner.raise_if_failed()
-            runner = None
+        runner = _resolve_runner_state(
+            runner,
+            player=player,
+            phase_label="model",
+            verbose=verbose,
+        )
 
         battles = dict(getattr(player, "battles", {}) or {})
 
@@ -1047,6 +1196,7 @@ def run_model_training_battle(
                     f"[model] battle_finished tag={battle_tag_str} result={battle_result} "
                     f"buffered_decisions={len(buffered)}"
                 )
+            _safe_cleanup_finished_battle(player, battle_tag_str, phase_label="model", verbose=verbose)
 
         active_battles = [battle for battle in battles.values() if not getattr(battle, "finished", False)]
         can_launch_more = decisions_collected < resolved_budget and (
@@ -1194,6 +1344,12 @@ def connect_to_battle(
     wait_loops = max_turns or 1000
 
     for _ in range(wait_loops):
+        runner = _resolve_runner_state(
+            runner,
+            player=player,
+            phase_label="connect",
+            verbose=True,
+        )
         battle = get_battle(player)
         if battle is not None:
             bot_name = getattr(battle, "player_username", None) or getattr(player, "username", None) or "unknown"
@@ -1202,8 +1358,8 @@ def connect_to_battle(
             print(f"Live battle connected: bot='{bot_name}' vs human='{human_name}' (tag={battle_tag})")
             return battle
 
-        if runner.done:
-            runner.raise_if_failed()
+        if runner is None:
+            runner = AsyncConnectionRunner(player, n_games).start()
         time.sleep(0.2)
 
     print("Timed out waiting for a live battle object.")
