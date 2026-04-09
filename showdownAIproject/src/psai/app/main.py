@@ -1167,7 +1167,7 @@ def main() -> int:
 
     # connect_to_battle(player, max_turns=100)
     # run_battle(player, mechanics=mechanics, top_k=3, model=None, max_turns=100)
-    run_test_battle(player, max_turns=100000)
+    #run_test_battle(player, max_turns=100000)
     # run_heuristic_training_battle(
     #     player,
     #     mechanics=mechanics,
@@ -1185,7 +1185,6 @@ def main() -> int:
     # 5. After the cycle completes, we run eval to determine if the winrate is above the accenptable amount.
     # 6. If the eval fails, stop the loop and change training config in train.py.
     
-    """
     training_report = run_training_cycle(
         TrainingLoopConfig(
             log_path="training/battle_logs.jsonl",
@@ -1200,7 +1199,7 @@ def main() -> int:
         player,
         mechanics,
     )
-    print(f"Training status: {training_report['status']}")"""
+    print(f"Training status: {training_report['status']}")
     # run_model_training_battle(player, mechanics=MechanicsAPI(), model=None, top_k=3, max_turns=100000)
 
     return 0
