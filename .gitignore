@@ -1,0 +1,19 @@
+*.egg-info/
+src/**/*.egg-info/
+__pycache__/
+*.py[cod]
+
+# Local/dev environment files
+.venv/
+showdownAIproject/.venv/
+.vscode/
+.codex/
+
+# Python build/test caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Training runtime artifacts
+showdownAIproject/training/artifacts/
+showdownAIproject/training/*.jsonl
