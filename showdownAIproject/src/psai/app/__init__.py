@@ -3,6 +3,8 @@
 # Plain-English summary:
 # This package exposes the battle-loop intake and chooser handoff flow.
 
+from importlib import import_module
+
 __all__ = [
     "get_battle",
     "get_turn_suggestions",
@@ -17,7 +19,7 @@ __all__ = [
 
 def __getattr__(name: str):
     if name in __all__:
-        from psai.app import main as main_module
+        main_module = import_module("psai.app.main")
 
         return getattr(main_module, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
