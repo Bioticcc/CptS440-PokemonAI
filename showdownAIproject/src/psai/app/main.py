@@ -367,6 +367,42 @@ def _safe_restart_showdown_listener(
     return True
 
 
+def _safe_requeue_ladder_search(
+    player: Any,
+    *,
+    phase_label: str,
+    verbose: bool = False,
+) -> bool:
+    ps_client = getattr(player, "ps_client", None)
+    search_ladder_game = getattr(ps_client, "search_ladder_game", None)
+    if ps_client is None or not callable(search_ladder_game):
+        return False
+
+    battle_format = str(getattr(player, "format", "") or getattr(player, "_configured_battle_format", "gen1randombattle"))
+    team = getattr(player, "next_team", None)
+    if callable(team):
+        try:
+            team = team()
+        except Exception:
+            team = None
+
+    try:
+        future = asyncio.run_coroutine_threadsafe(
+            search_ladder_game(battle_format, team),
+            POKE_LOOP,
+        )
+        future.result(timeout=5.0)
+        if verbose:
+            print(f"[{phase_label}] requeued ladder search format={battle_format}")
+        return True
+    except Exception as exc:
+        if verbose:
+            print(
+                f"[{phase_label}] requeue_failed error={type(exc).__name__}: {exc}"
+            )
+        return False
+
+
 def _resolve_runner_state(
     runner: AsyncConnectionRunner | None,
     *,
@@ -919,6 +955,7 @@ def run_heuristic_training_battle(
         )
 
     runner: AsyncConnectionRunner | None = None
+    runner_started_at: float | None = None
     battles_launched = 0
     battles_finished = 0
     decisions_played = 0
@@ -935,6 +972,8 @@ def run_heuristic_training_battle(
             phase_label="heuristic",
             verbose=verbose,
         )
+        if runner is None:
+            runner_started_at = None
 
         battles = dict(getattr(player, "battles", {}) or {})
 
@@ -976,9 +1015,22 @@ def run_heuristic_training_battle(
 
         if runner is None and not active_battles and can_launch_more:
             runner = _launch_single_game(player)
+            runner_started_at = time.time()
             battles_launched += 1
             if verbose:
                 print(f"[heuristic] launched ladder game #{battles_launched}")
+
+        if runner is not None and not runner.done and not active_battles:
+            started_at = runner_started_at or time.time()
+            idle_seconds = time.time() - started_at
+            if idle_seconds >= 45.0:
+                if verbose:
+                    print(
+                        f"[heuristic] idle_without_battle for {idle_seconds:.1f}s; "
+                        f"attempting ladder requeue"
+                    )
+                _safe_requeue_ladder_search(player, phase_label="heuristic", verbose=verbose)
+                runner_started_at = time.time()
 
         for battle in active_battles:
             battle_tag = str(getattr(battle, "battle_tag", id(battle)))
@@ -1143,6 +1195,7 @@ def run_model_training_battle(
         )
 
     runner: AsyncConnectionRunner | None = None
+    runner_started_at: float | None = None
     battles_launched = 0
     battles_finished = 0
     decisions_played = 0
@@ -1159,6 +1212,8 @@ def run_model_training_battle(
             phase_label="model",
             verbose=verbose,
         )
+        if runner is None:
+            runner_started_at = None
 
         battles = dict(getattr(player, "battles", {}) or {})
 
@@ -1203,9 +1258,22 @@ def run_model_training_battle(
 
         if runner is None and not active_battles and can_launch_more:
             runner = _launch_single_game(player)
+            runner_started_at = time.time()
             battles_launched += 1
             if verbose:
                 print(f"[model] launched ladder game #{battles_launched}")
+
+        if runner is not None and not runner.done and not active_battles:
+            started_at = runner_started_at or time.time()
+            idle_seconds = time.time() - started_at
+            if idle_seconds >= 45.0:
+                if verbose:
+                    print(
+                        f"[model] idle_without_battle for {idle_seconds:.1f}s; "
+                        f"attempting ladder requeue"
+                    )
+                _safe_requeue_ladder_search(player, phase_label="model", verbose=verbose)
+                runner_started_at = time.time()
 
         for battle in active_battles:
             battle_tag = str(getattr(battle, "battle_tag", id(battle)))

@@ -417,6 +417,7 @@ def run_training_cycle(
                     pass
 
             runner = None
+            runner_started_at: float | None = None
             games_launched = 0
             games_finished = 0
             wins = 0
@@ -432,6 +433,8 @@ def run_training_cycle(
                     phase_label="eval",
                     verbose=config.verbose,
                 )
+                if runner is None:
+                    runner_started_at = None
 
                 battles = dict(getattr(player, "battles", {}) or {})
                 for battle_tag, battle in battles.items():
@@ -466,7 +469,24 @@ def run_training_cycle(
                 active_battles = [battle for battle in battles.values() if not getattr(battle, "finished", False)]
                 if runner is None and not active_battles and games_launched < config.eval_games:
                     runner = app_main.AsyncConnectionRunner(player, 1).start()
+                    runner_started_at = time.time()
                     games_launched += 1
+
+                if runner is not None and not runner.done and not active_battles:
+                    started_at = runner_started_at or time.time()
+                    idle_seconds = time.time() - started_at
+                    if idle_seconds >= 45.0:
+                        if config.verbose:
+                            print(
+                                f"[eval] idle_without_battle for {idle_seconds:.1f}s; "
+                                f"attempting ladder requeue"
+                            )
+                        app_main._safe_requeue_ladder_search(
+                            player,
+                            phase_label="eval",
+                            verbose=config.verbose,
+                        )
+                        runner_started_at = time.time()
 
                 for battle in active_battles:
                     battle_tag = str(getattr(battle, "battle_tag", id(battle)))

@@ -28,7 +28,7 @@ cd /home/jeezu/CptS440-PokemonAI
 git checkout main
 git status
 git add -u
-git commit -m ""
+git commit -m "Not requeing games sometimes"
 git push origin main
 git rev-parse --short HEAD
 ## PULL
@@ -42,6 +42,9 @@ git rev-parse --short origin/main
 cd showdownAIproject
 source .venv/bin/activate
 pip install -e .
+
+# THEN RUN WITH:
+python3 -m psai.app.main
 
 # INVALID RUN? DELETE ALL LOGS: (THIS MEANS ALL. IF YOU WANT SPECIFIC, DO SPECIFIC.)
 rm -f training/battle_logs.jsonl
