@@ -161,6 +161,54 @@ def _safe_requeue_ladder_search(
         return False
 
 
+def _safe_ensure_battle_timer_on(
+    player: Any,
+    battle_tag: str,
+    *,
+    phase_label: str,
+    verbose: bool = False,
+    min_interval_seconds: float = 10.0,
+) -> bool:
+    normalized_tag = str(battle_tag or "")
+    if not normalized_tag:
+        return False
+
+    timer_sent_at = getattr(player, "_timer_on_sent_at", None)
+    if not isinstance(timer_sent_at, dict):
+        timer_sent_at = {}
+        try:
+            setattr(player, "_timer_on_sent_at", timer_sent_at)
+        except Exception:
+            pass
+
+    now = time.time()
+    last_sent_at = float(timer_sent_at.get(normalized_tag, 0.0))
+    if now - last_sent_at < max(0.0, float(min_interval_seconds)):
+        return False
+
+    ps_client = getattr(player, "ps_client", None)
+    send_message = getattr(ps_client, "send_message", None)
+    websocket = getattr(ps_client, "websocket", None)
+    if ps_client is None or websocket is None or not callable(send_message):
+        return False
+
+    try:
+        future = asyncio.run_coroutine_threadsafe(
+            send_message("/timer on", normalized_tag),
+            POKE_LOOP,
+        )
+        future.result(timeout=2.0)
+        timer_sent_at[normalized_tag] = now
+        return True
+    except Exception as exc:
+        if verbose:
+            print(
+                f"[{phase_label}] timer_on_failed battle={normalized_tag} "
+                f"error={type(exc).__name__}: {exc}"
+            )
+        return False
+
+
 def _resolve_runner_state(
     runner: AsyncConnectionRunner | None,
     *,
@@ -219,6 +267,10 @@ def _safe_cleanup_finished_battle(
     pending_orders = getattr(player, "_pending_orders", None)
     if isinstance(pending_orders, dict):
         pending_orders.pop(normalized_tag, None)
+
+    timer_sent_at = getattr(player, "_timer_on_sent_at", None)
+    if isinstance(timer_sent_at, dict):
+        timer_sent_at.pop(normalized_tag, None)
 
     if verbose and phase_label:
         print(f"[{phase_label}] cleaned_up battle={normalized_tag}")

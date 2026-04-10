@@ -22,6 +22,7 @@ from psai.app.connections import (
     AsyncConnectionRunner,
     _resolve_runner_state,
     _safe_cleanup_finished_battle,
+    _safe_ensure_battle_timer_on,
     _safe_requeue_ladder_search,
     _safe_reset_battles,
 )
@@ -182,6 +183,7 @@ class pokeEnvPlayerInfo(Player):
             "server_configuration": ShowdownServerConfiguration,
             "battle_format": battle_format,
             "strict_battle_tracking": False,
+            "start_timer_on_battle_start": True,
         }
         if team:
             player_kwargs["team"] = team
@@ -589,6 +591,9 @@ def run_battle(
         if getattr(battle, "finished", False):
             break
 
+        battle_tag = str(getattr(battle, "battle_tag", id(battle)) or id(battle))
+        _safe_ensure_battle_timer_on(player, battle_tag, phase_label="manual", verbose=False)
+
         state = get_state(battle)
         turn_suggestions = get_turn_suggestions(state, mechanics, top_k=top_k, model=model)
 
@@ -756,6 +761,7 @@ def run_training_battle(
 
         for battle in active_battles:
             battle_tag = str(getattr(battle, "battle_tag", id(battle)))
+            _safe_ensure_battle_timer_on(player, battle_tag, phase_label=phase_label, verbose=verbose)
             request_signature = _battle_request_signature(battle)
             now = time.time()
             if last_prompted_request.get(battle_tag) == request_signature:

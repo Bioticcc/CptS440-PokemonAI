@@ -32,6 +32,7 @@ from psai.app.connections import (
     AsyncConnectionRunner,
     _resolve_runner_state,
     _safe_cleanup_finished_battle,
+    _safe_ensure_battle_timer_on,
     _safe_requeue_ladder_search,
 )
 from psai.domain.state import LegalAction, State, parse_battle_to_state
@@ -503,6 +504,12 @@ def run_training_cycle(
 
                 for battle in active_battles:
                     battle_tag = str(getattr(battle, "battle_tag", id(battle)))
+                    _safe_ensure_battle_timer_on(
+                        player,
+                        battle_tag,
+                        phase_label="eval",
+                        verbose=config.verbose,
+                    )
                     request_signature = app_main._battle_request_signature(battle)
                     now = time.time()
                     if last_prompted_request.get(battle_tag) == request_signature:

@@ -28,7 +28,7 @@ cd /home/jeezu/CptS440-PokemonAI
 git checkout main
 git status
 git add -u
-git commit -m "MAYBE fixed the requeue issue"
+git commit -m "Bot automatically turns on battle timer now! will stop timeouts"
 git push origin main
 git rev-parse --short HEAD
 ## PULL
