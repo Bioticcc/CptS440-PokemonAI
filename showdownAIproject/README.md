@@ -28,7 +28,7 @@ cd /home/jeezu/CptS440-PokemonAI
 git checkout main
 git status
 git add -u
-git commit -m "split main into two files since its way too big"
+git commit -m "MAYBE fixed the requeue issue"
 git push origin main
 git rev-parse --short HEAD
 ## PULL

@@ -188,18 +188,32 @@ class pokeEnvPlayerInfo(Player):
 
         super().__init__(**player_kwargs)
         self._pending_orders: dict[str, Any] = {}
+        self._pending_order_timeout_seconds = 15.0
 
     # Store pending move actions, then when prompted by showdown return that action.
     def set_pending_order(self, battle_tag: str, order: Any) -> None:
-        self._pending_orders[battle_tag] = order
+        normalized_tag = str(battle_tag or "")
+        self._pending_orders[normalized_tag] = order
 
     def choose_move(self, battle):
-        battle_tag = getattr(battle, "battle_tag", "")
+        battle_tag = str(getattr(battle, "battle_tag", id(battle)) or id(battle))
+        started_at = time.time()
 
         while True:
             pending_order = self._pending_orders.pop(battle_tag, None)
             if pending_order is not None:
                 return pending_order
+
+            if getattr(battle, "finished", False):
+                return _default_order(self)
+
+            elapsed = time.time() - started_at
+            if elapsed >= self._pending_order_timeout_seconds:
+                print(
+                    f"[runtime] pending_order_timeout battle={battle_tag} "
+                    f"waited={elapsed:.1f}s; sending default order"
+                )
+                return _default_order(self)
             time.sleep(0.1)
 
 
@@ -590,7 +604,8 @@ def run_battle(
         chosen_order = send_confirmed_move(player, battle, chosen_action)
 
         if hasattr(player, "set_pending_order"):
-            player.set_pending_order(getattr(battle, "battle_tag", ""), chosen_order)
+            battle_tag = str(getattr(battle, "battle_tag", id(battle)) or id(battle))
+            player.set_pending_order(battle_tag, chosen_order)
 
         turns_ran += 1
         if max_turns is not None and turns_ran >= max_turns:
@@ -665,6 +680,8 @@ def run_training_battle(
     pending_by_battle: dict[str, list[tuple[State, str]]] = {}
     finished_tags: set[str] = set()
     last_prompted_request: dict[str, tuple[Any, ...]] = {}
+    last_prompted_at: dict[str, float] = {}
+    retry_same_request_after_seconds = 15.0
 
     while True:
         runner = _resolve_runner_state(
@@ -704,6 +721,7 @@ def run_training_battle(
 
             finished_tags.add(battle_tag_str)
             last_prompted_request.pop(battle_tag_str, None)
+            last_prompted_at.pop(battle_tag_str, None)
             battles_finished += 1
             if verbose:
                 print(
@@ -739,8 +757,17 @@ def run_training_battle(
         for battle in active_battles:
             battle_tag = str(getattr(battle, "battle_tag", id(battle)))
             request_signature = _battle_request_signature(battle)
+            now = time.time()
             if last_prompted_request.get(battle_tag) == request_signature:
-                continue
+                last_prompt_time = float(last_prompted_at.get(battle_tag, now))
+                elapsed = now - last_prompt_time
+                if elapsed < retry_same_request_after_seconds:
+                    continue
+                if verbose:
+                    print(
+                        f"[{phase_label}] request_stalled battle={battle_tag} "
+                        f"waited={elapsed:.1f}s; retrying order"
+                    )
 
             try:
                 state = parse_battle_to_state(battle)
@@ -753,6 +780,7 @@ def run_training_battle(
                 if hasattr(player, "set_pending_order"):
                     player.set_pending_order(battle_tag, _default_order(player))
                 last_prompted_request[battle_tag] = request_signature
+                last_prompted_at[battle_tag] = now
                 continue
             if not _has_actionable_request(state, battle):
                 continue
@@ -790,6 +818,7 @@ def run_training_battle(
             if should_log_decision:
                 decisions_played += 1
             last_prompted_request[battle_tag] = request_signature
+            last_prompted_at[battle_tag] = now
             if (
                 verbose
                 and should_log_decision

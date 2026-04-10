@@ -434,6 +434,8 @@ def run_training_cycle(
             ties = 0
             counted_tags: set[str] = set()
             last_prompted_request: dict[str, tuple[Any, ...]] = {}
+            last_prompted_at: dict[str, float] = {}
+            retry_same_request_after_seconds = 15.0
 
             while True:
                 runner = _resolve_runner_state(
@@ -447,7 +449,8 @@ def run_training_cycle(
 
                 battles = dict(getattr(player, "battles", {}) or {})
                 for battle_tag, battle in battles.items():
-                    if not getattr(battle, "finished", False) or battle_tag in counted_tags:
+                    battle_tag_str = str(battle_tag)
+                    if not getattr(battle, "finished", False) or battle_tag_str in counted_tags:
                         continue
                     won = getattr(battle, "won", None)
                     if won is True:
@@ -456,12 +459,13 @@ def run_training_cycle(
                         losses += 1
                     else:
                         ties += 1
-                    counted_tags.add(battle_tag)
+                    counted_tags.add(battle_tag_str)
                     games_finished += 1
-                    last_prompted_request.pop(battle_tag, None)
+                    last_prompted_request.pop(battle_tag_str, None)
+                    last_prompted_at.pop(battle_tag_str, None)
                     _safe_cleanup_finished_battle(
                         player,
-                        str(battle_tag),
+                        battle_tag_str,
                         phase_label="eval",
                         verbose=False,
                     )
@@ -500,8 +504,17 @@ def run_training_cycle(
                 for battle in active_battles:
                     battle_tag = str(getattr(battle, "battle_tag", id(battle)))
                     request_signature = app_main._battle_request_signature(battle)
+                    now = time.time()
                     if last_prompted_request.get(battle_tag) == request_signature:
-                        continue
+                        last_prompt_time = float(last_prompted_at.get(battle_tag, now))
+                        elapsed = now - last_prompt_time
+                        if elapsed < retry_same_request_after_seconds:
+                            continue
+                        if config.verbose:
+                            print(
+                                f"[eval] request_stalled battle={battle_tag} "
+                                f"waited={elapsed:.1f}s; retrying order"
+                            )
 
                     try:
                         state = parse_battle_to_state(battle)
@@ -514,6 +527,7 @@ def run_training_cycle(
                         if hasattr(player, "set_pending_order"):
                             player.set_pending_order(battle_tag, app_main._default_order(player))
                         last_prompted_request[battle_tag] = request_signature
+                        last_prompted_at[battle_tag] = now
                         continue
                     if not app_main._has_actionable_request(state, battle):
                         continue
@@ -538,6 +552,7 @@ def run_training_cycle(
                     if hasattr(player, "set_pending_order"):
                         player.set_pending_order(battle_tag, chosen_order)
                     last_prompted_request[battle_tag] = request_signature
+                    last_prompted_at[battle_tag] = now
 
                 if games_finished >= config.eval_games and not active_battles and runner is None:
                     break
