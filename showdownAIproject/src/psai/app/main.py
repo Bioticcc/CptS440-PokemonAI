@@ -418,11 +418,9 @@ def _safe_cleanup_finished_battle(
         except Exception:
             pass
 
-    # Keep the in-memory tracker small during long runs.
-    for attr_name in ("_battles", "battles"):
-        battle_map = getattr(player, attr_name, None)
-        if isinstance(battle_map, dict):
-            battle_map.pop(normalized_tag, None)
+    # Important: do not remove entries from player._battles here.
+    # poke-env may still receive trailing messages for a finished battle tag, and
+    # removing the object early can stall its internal battle-message handler.
 
     pending_orders = getattr(player, "_pending_orders", None)
     if isinstance(pending_orders, dict):

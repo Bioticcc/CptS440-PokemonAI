@@ -266,6 +266,16 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
         json.dump(payload, handle, indent=2, sort_keys=True)
 
 
+def _count_heuristic_records(records: Sequence[BattleLogRecord]) -> int:
+    total = 0
+    for record in records:
+        source = str(record.metadata.get("source", "")).strip().lower()
+        # Backward compatibility: older logs may not have metadata.source.
+        if source in {"", "heuristic"}:
+            total += 1
+    return total
+
+
 def run_training_cycle(
     config: TrainingLoopConfig,
     player: Any,
@@ -290,13 +300,20 @@ def run_training_cycle(
             f"[loop] start log_path={log_path} artifact_dir={artifact_dir} "
             f"existing_records={len(records)} max_cycles={config.max_cycles}"
         )
-    if not records and config.bootstrap_decisions > 0:
+    heuristic_records = _count_heuristic_records(records)
+    bootstrap_target = max(0, int(config.bootstrap_decisions))
+    bootstrap_remaining = max(0, bootstrap_target - heuristic_records)
+    if bootstrap_remaining > 0:
         if config.verbose:
-            print(f"[loop] bootstrap heuristic collection target={config.bootstrap_decisions}")
+            print(
+                f"[loop] bootstrap heuristic resume "
+                f"existing={heuristic_records}/{bootstrap_target} "
+                f"remaining={bootstrap_remaining}"
+            )
         bootstrap_result = app_main.run_heuristic_training_battle(
             player,
             mechanics=mechanics,
-            decision_budget=config.bootstrap_decisions,
+            decision_budget=bootstrap_remaining,
             log_path=log_path,
             cycle_id=0,
             n_games=config.collection_n_games,
@@ -306,8 +323,12 @@ def run_training_cycle(
             print_turn_suggestions=config.print_turn_suggestions,
         )
         records = read_log_records(log_path)
+        heuristic_records = _count_heuristic_records(records)
         if config.verbose:
-            print(f"[loop] bootstrap complete records={len(records)}")
+            print(
+                f"[loop] bootstrap complete heuristic={heuristic_records}/{bootstrap_target} "
+                f"records={len(records)}"
+            )
 
     if not records:
         raise ValueError("No training records available after bootstrap stage.")
