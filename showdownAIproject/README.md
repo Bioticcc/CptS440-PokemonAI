@@ -28,7 +28,7 @@ cd /home/jeezu/CptS440-PokemonAI
 git checkout main
 git status
 git add -u
-git commit -m "Not requeing games sometimes"
+git commit -m "split main into two files since its way too big"
 git push origin main
 git rev-parse --short HEAD
 ## PULL
@@ -120,7 +120,7 @@ mkdir -p training/artifacts/checkpoints training/artifacts/metrics
 ## CURRENT FILE STRUCTURE EXPLANATION:
 What we currently have:
 
-![alt text](www/filePathPreview.png)
+
 
 First, domain/. This is just where we ask "what is the current game state" and output the answer. Here, State Parser converts the live poke-env battle object into our internal State for other sections that use that outputed data for calculations.
 
@@ -130,7 +130,7 @@ Decision/ is "given current state, what move do we pick". Initially, we use heur
 
 Training/ is where we actually "teach" the policy value network with the output logs we got from the baseline heuristic 1v1's. This is where the actual machine learning happens.
 
-In app/, we create the actual local UI/control panel and move confirmation flow. Right now, `main.py` is also where ladder battle orchestration lives: manual product battle (`run_battle`), manual ladder test battle (`run_test_battle`), and auto ladder data collection for heuristic/model phases (`run_heuristic_training_battle`, `run_model_training_battle`).
+In app/, we create the actual local UI/control panel and move confirmation flow. Right now, `main.py` is where ladder battle orchestration lives: manual product battle (`run_battle`) and unified auto ladder data collection (`run_training_battle(..., source=\"heuristic\"|\"model\")`). Connection/recovery helpers live in `app/connections.py`.
 
 So our "pipeline" is as such:
 
@@ -149,17 +149,24 @@ So our "pipeline" is as such:
 9. poke-env sends that move to showdown
 
 
-## CURRENT CODE STATUS (IMPORTANT FOR NEXT CHAT)
+## TRAINING CYCLE STABILITY NOTE 
+- Current status: the training cycle is actively working in long ladder runs.
+- Do NOT change training-cycle behavior unless there is a specific, reproducible runtime error.
+- Training-cycle behavior includes:
+    - `run_training_cycle(...)` orchestration flow
+    - `run_training_battle(..., source="heuristic")` data-collection flow
+    - `run_training_battle(..., source="model")` data-collection flow
+- If an error occurs, apply the smallest targeted bugfix only, then rerun and verify.
+- Avoid refactors, architecture moves, or “cleanup” edits to cycle logic during stable runs.
+
+## CURRENT CODE STATUS
 - `src/psai/app/main.py`
     - Has `pokeEnvPlayerInfo` player subclass with inline account/format config in its constructor.
-    - Ladder connection runner is `AsyncConnectionRunner(player, n_games).start()` (ladder-only; no challenge send/accept paths).
-    - `connect_to_battle(...)` now starts ladder games and waits for a live battle object.
-    - Has 4 battle runners:
+    - Ladder connection runner and network guards are imported from `src/psai/app/connections.py`.
+    - Has 2 battle runners:
         - `run_battle(...)` = product/manual pipeline (state -> chooser -> human confirm -> send order)
-        - `run_test_battle(...)` = manual ladder testing (choose attack/switch and index)
-        - `run_heuristic_training_battle(...)` = auto ladder collection using heuristic/search decisions
-        - `run_model_training_battle(...)` = auto ladder collection using heuristic/search + model bonus callable
-    - Heuristic/model training collection loops and JSONL logging currently live directly inside `run_heuristic_training_battle(...)` and `run_model_training_battle(...)`.
+        - `run_training_battle(..., source="heuristic"|"model")` = auto ladder collection for both phases (model bonus optional based on source)
+    - Training collection loop and JSONL logging are unified in `run_training_battle(...)`.
     - `main()` currently runs the full training orchestrator (`run_training_cycle(...)`) with:
         - `bootstrap_decisions=20_000`
         - `model_cycle_decisions=10_000`
@@ -167,11 +174,14 @@ So our "pipeline" is as such:
         - `max_cycles=1`
       and prints `Training status: ...`.
 
+- `src/psai/app/connections.py`
+    - Owns `AsyncConnectionRunner` and network/recovery helpers (`_resolve_runner_state`, reconnect/requeue, and finished-battle cleanup).
+
 - `src/psai/training/train.py`
     - `TrainConfig` + `train_policy_value(...)` handle optimization/checkpointing.
     - `TrainingLoopConfig` controls orchestration (`bootstrap_decisions`, optional `heuristic_refresh_decisions`, `model_cycle_decisions`, eval gate, etc.).
     - `run_training_cycle(...)` does:
-        1. optional heuristic bootstrap when logs are empty,
+        1. resume-aware heuristic bootstrap to target count,
         2. model train on accumulated logs,
         3. model-play data collection,
         4. inline ladder evaluation,

@@ -4,25 +4,36 @@
 # This module provides a battle-loop scaffold: get battle objects,
 # parse each into State, run chooser, and print move suggestions.
 
+# ========================================
+# Imports
+# ========================================
+
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
-import threading
 import time
 from typing import Any
 
 from poke_env import AccountConfiguration, ShowdownServerConfiguration
 from poke_env.battle.pokemon import Pokemon
-from poke_env.concurrency import POKE_LOOP
 from poke_env.player import Player
 
+from psai.app.connections import (
+    AsyncConnectionRunner,
+    _resolve_runner_state,
+    _safe_cleanup_finished_battle,
+    _safe_requeue_ladder_search,
+    _safe_reset_battles,
+)
 from psai.decision.chooser import ModelBonusFn, MoveSuggestion, choose_actions
 from psai.domain.state import State, parse_battle_to_state
 from psai.mechanics.api import MechanicsAPI
 from psai.training.dataset import make_log_record, write_log_record
 from psai.training.train import TrainingLoopConfig, run_training_cycle
 
+# ========================================
+# Guard Code for Abnormal Shoddown Requests (Like hyperbeam recharge)
+# ========================================
 
 _ORIGINAL_AVAILABLE_MOVES_FROM_REQUEST = Pokemon.available_moves_from_request
 
@@ -116,48 +127,9 @@ def _install_poke_env_move_request_fallback() -> None:
 
 _install_poke_env_move_request_fallback()
 
-
-class AsyncConnectionRunner:
-
-    # Keeps showdown ladder connection running in background while other loop logic runs.
-
-    def __init__(self, player: Any, n_games: int | None = 1) -> None:
-        self._player = player
-        self._n_games = None if n_games is None else int(n_games)
-        if self._n_games is not None and self._n_games <= 0:
-            raise ValueError("n_games must be positive or None")
-        self._done_event = threading.Event()
-        self._error: BaseException | None = None
-        self._thread = threading.Thread(target=self._run, daemon=True)
-
-    def _run(self) -> None:
-        try:
-            asyncio.run(self._run_coro())
-        except BaseException as exc:  # pragma: no cover - defensive bridge from thread
-            self._error = exc
-        finally:
-            self._done_event.set()
-
-    async def _run_coro(self) -> None:
-        games = self._n_games or 1
-        await self._player.ladder(games)
-
-    def start(self) -> "AsyncConnectionRunner":
-        self._thread.start()
-        return self
-
-    @property
-    def done(self) -> bool:
-        return self._done_event.is_set()
-
-    @property
-    def error(self) -> BaseException | None:
-        return self._error
-
-    def raise_if_failed(self) -> None:
-        if self._error is not None:
-            raise RuntimeError("connection runner failed") from self._error
-
+# ========================================
+# Getting Battles, States, Player, and Player Actions
+# ========================================
 
 def get_battle(player):
 
@@ -293,177 +265,9 @@ def send_confirmed_move(player: Any, battle: Any, chosen_action: Any) -> Any:
     selected_switch = list(battle.available_switches)[action_index - 1]
     return player.create_order(selected_switch)
 
-
-def _safe_reset_battles(player: Any) -> None:
-    reset_fn = getattr(player, "reset_battles", None)
-    if not callable(reset_fn):
-        return
-    try:
-        reset_fn()
-    except Exception:
-        return
-
-
-def _is_recoverable_connection_error(exc: BaseException | None) -> bool:
-    if exc is None:
-        return False
-    message = str(exc).lower()
-    markers = (
-        "keepalive ping timeout",
-        "connectionclosed",
-        "websocket",
-        "no close frame received",
-        "connection is closed",
-        "sent 1011",
-    )
-    return any(marker in message for marker in markers)
-
-
-def _safe_clear_all_battles(player: Any) -> None:
-    battle_map = getattr(player, "_battles", None)
-    if isinstance(battle_map, dict):
-        battle_map.clear()
-
-    pending_orders = getattr(player, "_pending_orders", None)
-    if isinstance(pending_orders, dict):
-        pending_orders.clear()
-
-
-def _safe_restart_showdown_listener(
-    player: Any,
-    *,
-    phase_label: str,
-    verbose: bool = False,
-) -> bool:
-    ps_client = getattr(player, "ps_client", None)
-    if ps_client is None:
-        return False
-
-    listening_future = getattr(ps_client, "_listening_coroutine", None)
-    if listening_future is not None:
-        try:
-            if not listening_future.done():
-                listening_future.cancel()
-        except Exception:
-            pass
-
-    try:
-        new_future = asyncio.run_coroutine_threadsafe(ps_client.listen(), POKE_LOOP)
-    except Exception as exc:
-        if verbose:
-            print(
-                f"[{phase_label}] reconnect_failed error={type(exc).__name__}: {exc}"
-            )
-        return False
-
-    try:
-        setattr(ps_client, "_listening_coroutine", new_future)
-    except Exception:
-        pass
-
-    if verbose:
-        print(f"[{phase_label}] reconnect_started")
-    time.sleep(1.0)
-    return True
-
-
-def _safe_requeue_ladder_search(
-    player: Any,
-    *,
-    phase_label: str,
-    verbose: bool = False,
-) -> bool:
-    ps_client = getattr(player, "ps_client", None)
-    search_ladder_game = getattr(ps_client, "search_ladder_game", None)
-    if ps_client is None or not callable(search_ladder_game):
-        return False
-
-    battle_format = str(getattr(player, "format", "") or getattr(player, "_configured_battle_format", "gen1randombattle"))
-    team = getattr(player, "next_team", None)
-    if callable(team):
-        try:
-            team = team()
-        except Exception:
-            team = None
-
-    try:
-        future = asyncio.run_coroutine_threadsafe(
-            search_ladder_game(battle_format, team),
-            POKE_LOOP,
-        )
-        future.result(timeout=5.0)
-        if verbose:
-            print(f"[{phase_label}] requeued ladder search format={battle_format}")
-        return True
-    except Exception as exc:
-        if verbose:
-            print(
-                f"[{phase_label}] requeue_failed error={type(exc).__name__}: {exc}"
-            )
-        return False
-
-
-def _resolve_runner_state(
-    runner: AsyncConnectionRunner | None,
-    *,
-    player: Any,
-    phase_label: str,
-    verbose: bool = False,
-) -> AsyncConnectionRunner | None:
-    if runner is None or not runner.done:
-        return runner
-
-    runner_error = runner.error
-    if runner_error is None:
-        return None
-
-    if _is_recoverable_connection_error(runner_error):
-        if verbose:
-            print(
-                f"[{phase_label}] connection dropped "
-                f"({type(runner_error).__name__}: {runner_error}). Reconnecting."
-            )
-        _safe_clear_all_battles(player)
-        _safe_restart_showdown_listener(player, phase_label=phase_label, verbose=verbose)
-        return None
-
-    runner.raise_if_failed()
-    return None
-
-
-def _safe_cleanup_finished_battle(
-    player: Any,
-    battle_tag: str,
-    *,
-    phase_label: str | None = None,
-    verbose: bool = False,
-) -> None:
-    normalized_tag = str(battle_tag)
-
-    # Best effort: ask showdown to leave the room for this finished battle.
-    ps_client = getattr(player, "ps_client", None)
-    send_message = getattr(ps_client, "send_message", None)
-    websocket = getattr(ps_client, "websocket", None)
-    if websocket is not None and callable(send_message):
-        try:
-            future = asyncio.run_coroutine_threadsafe(
-                send_message(f"/leave {normalized_tag}"),
-                POKE_LOOP,
-            )
-            future.result(timeout=1.0)
-        except Exception:
-            pass
-
-    # Important: do not remove entries from player._battles here.
-    # poke-env may still receive trailing messages for a finished battle tag, and
-    # removing the object early can stall its internal battle-message handler.
-
-    pending_orders = getattr(player, "_pending_orders", None)
-    if isinstance(pending_orders, dict):
-        pending_orders.pop(normalized_tag, None)
-
-    if verbose and phase_label:
-        print(f"[{phase_label}] cleaned_up battle={normalized_tag}")
+# ========================================
+# Internal Request and Order Helpers
+# ========================================
 
 
 def _battle_outcome_value(battle: Any) -> tuple[float, str]:
@@ -668,6 +472,10 @@ def _choose_order_for_request(
 
     return _default_order(player), "default"
 
+# ========================================
+# Logging and Progress Helpers
+# ========================================
+
 
 def _print_turn_suggestions(
     phase_label: str,
@@ -740,6 +548,10 @@ def _safe_write_decision_record(
             f"chosen={chosen_action_id} error={type(exc).__name__}: {exc}"
         )
 
+# ========================================
+# Public Runtime Functions
+# ========================================
+
 
 def run_battle(
     player: Any,
@@ -787,382 +599,17 @@ def run_battle(
         time.sleep(0.1)
 
 
-def run_test_battle(
-    player: Any,
-    *,
-    mechanics: MechanicsAPI | None = None,
-    top_k: int = 1,
-    max_turns: int | None = None,
-    n_games: int | None = 1,
-    verbose: bool = True,
-    print_turn_suggestions: bool = True,
-    print_top_k: int | None = None,
-) -> None:
-
-    # Ladder connectivity smoke test:
-    # starts ladder game(s) and auto-plays with heuristic choices only.
-    # No training logs are written.
-
-    _safe_reset_battles(player)
-    resolved_mechanics = mechanics or MechanicsAPI()
-    runner = AsyncConnectionRunner(player, n_games).start()
-    target_games = int(n_games if n_games is not None else 1)
-    resolved_print_top_k = int(print_top_k if print_top_k is not None else top_k)
-
-    turns_ran = 0
-    last_prompted_request: dict[str, tuple[Any, ...]] = {}
-    finished_tags: set[str] = set()
-    seen_tags: set[str] = set()
-
-    if verbose:
-        print(f"[test] start n_games={n_games} top_k={top_k} max_turns={max_turns}")
-
-    while True:
-        runner = _resolve_runner_state(
-            runner,
-            player=player,
-            phase_label="test",
-            verbose=verbose,
-        )
-
-        battles = dict(getattr(player, "battles", {}) or {})
-        active_battles = []
-        for battle_tag, battle in battles.items():
-            if getattr(battle, "finished", False):
-                if battle_tag not in finished_tags:
-                    finished_tags.add(battle_tag)
-                    if verbose:
-                        outcome_value, battle_result = _battle_outcome_value(battle)
-                        del outcome_value
-                        print(f"[test] battle_finished tag={battle_tag} result={battle_result}")
-                    _safe_cleanup_finished_battle(player, str(battle_tag), phase_label="test", verbose=verbose)
-                last_prompted_request.pop(str(battle_tag), None)
-                continue
-            active_battles.append(battle)
-
-        for battle in active_battles:
-            battle_tag = str(getattr(battle, "battle_tag", id(battle)))
-            if battle_tag not in seen_tags:
-                seen_tags.add(battle_tag)
-                if verbose:
-                    print(f"[test] battle_started tag={battle_tag}")
-            request_signature = _battle_request_signature(battle)
-            if last_prompted_request.get(battle_tag) == request_signature:
-                continue
-
-            try:
-                state = parse_battle_to_state(battle)
-            except Exception as exc:
-                if verbose:
-                    print(
-                        f"[test] parse_state_failed battle={battle_tag} "
-                        f"error={type(exc).__name__}: {exc}. Sending default order."
-                    )
-                if hasattr(player, "set_pending_order"):
-                    player.set_pending_order(battle_tag, _default_order(player))
-                last_prompted_request[battle_tag] = request_signature
-                turns_ran += 1
-                continue
-            if not _has_actionable_request(state, battle):
-                continue
-
-            turn_suggestions = (
-                get_turn_suggestions(
-                    state,
-                    resolved_mechanics,
-                    top_k=top_k,
-                    model=None,
-                )
-                if state.legal_actions
-                else []
-            )
-            chosen_order, _chosen_action_id = _choose_order_for_request(
-                player,
-                battle,
-                state,
-                turn_suggestions,
-            )
-
-            if verbose and print_turn_suggestions:
-                _print_turn_suggestions(
-                    "test",
-                    battle_tag,
-                    state,
-                    turn_suggestions,
-                    _chosen_action_id,
-                    max_suggestions=resolved_print_top_k,
-                )
-
-            if hasattr(player, "set_pending_order"):
-                player.set_pending_order(battle_tag, chosen_order)
-            last_prompted_request[battle_tag] = request_signature
-            turns_ran += 1
-
-            if max_turns is not None and turns_ran >= max_turns:
-                if verbose:
-                    print(f"[test] reached max_turns={max_turns}, stopping")
-                return
-
-        if runner is None and not active_battles:
-            if len(finished_tags) >= target_games:
-                break
-            remaining_games = max(1, target_games - len(finished_tags))
-            runner = AsyncConnectionRunner(player, remaining_games).start()
-
-        time.sleep(0.1)
-
-    if verbose:
-        print(f"[test] complete turns={turns_ran} battles_finished={len(finished_tags)}")
-
-
-def run_heuristic_training_battle(
+def run_training_battle(
     player: Any,
     *,
     mechanics: MechanicsAPI,
+    source: str,
+    model: ModelBonusFn | None = None,
     top_k: int = 3,
     max_turns: int | None = None,
     decision_budget: int | None = None,
     log_path: str | Path = "training/battle_logs.jsonl",
-    cycle_id: int = 0,
-    n_games: int | None = None,
-    verbose: bool = True,
-    print_every_decisions: int = 100,
-    print_top_k: int | None = None,
-    print_turn_suggestions: bool = True,
-) -> dict[str, Any]:
-
-    resolved_budget = int(decision_budget if decision_budget is not None else (max_turns or 1000))
-    resolved_print_top_k = int(print_top_k if print_top_k is not None else top_k)
-    if resolved_budget <= 0:
-        return {
-            "source": "heuristic",
-            "cycle_id": cycle_id,
-            "decision_budget": 0,
-            "decisions_collected": 0,
-            "decisions_played": 0,
-            "battles_launched": 0,
-            "battles_finished": 0,
-        }
-
-    output_path = Path(log_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    _safe_reset_battles(player)
-
-    if verbose:
-        print(
-            f"[heuristic] start cycle={cycle_id} decision_budget={resolved_budget} "
-            f"log_path={output_path}"
-        )
-
-    runner: AsyncConnectionRunner | None = None
-    runner_started_at: float | None = None
-    battles_launched = 0
-    battles_finished = 0
-    decisions_played = 0
-    decisions_collected = 0
-
-    pending_by_battle: dict[str, list[tuple[State, str]]] = {}
-    finished_tags: set[str] = set()
-    last_prompted_request: dict[str, tuple[Any, ...]] = {}
-
-    while True:
-        runner = _resolve_runner_state(
-            runner,
-            player=player,
-            phase_label="heuristic",
-            verbose=verbose,
-        )
-        if runner is None:
-            runner_started_at = None
-
-        battles = dict(getattr(player, "battles", {}) or {})
-
-        for battle_tag, battle in battles.items():
-            battle_tag_str = str(battle_tag)
-            if not getattr(battle, "finished", False) or battle_tag_str in finished_tags:
-                continue
-
-            outcome_value, battle_result = _battle_outcome_value(battle)
-            buffered = pending_by_battle.pop(battle_tag_str, [])
-            for state, chosen_action_id in buffered:
-                _safe_write_decision_record(
-                    output_path,
-                    state=state,
-                    chosen_action_id=chosen_action_id,
-                    outcome_value=outcome_value,
-                    metadata={
-                        "source": "heuristic",
-                        "cycle_id": int(cycle_id),
-                        "battle_result": battle_result,
-                    },
-                    phase_label="heuristic",
-                )
-
-            finished_tags.add(battle_tag_str)
-            last_prompted_request.pop(battle_tag_str, None)
-            battles_finished += 1
-            if verbose:
-                print(
-                    f"[heuristic] battle_finished tag={battle_tag_str} result={battle_result} "
-                    f"buffered_decisions={len(buffered)}"
-                )
-            _safe_cleanup_finished_battle(player, battle_tag_str, phase_label="heuristic", verbose=verbose)
-
-        active_battles = [battle for battle in battles.values() if not getattr(battle, "finished", False)]
-        can_launch_more = decisions_collected < resolved_budget and (
-            n_games is None or battles_launched < n_games
-        )
-
-        if runner is None and not active_battles and can_launch_more:
-            runner = _launch_single_game(player)
-            runner_started_at = time.time()
-            battles_launched += 1
-            if verbose:
-                print(f"[heuristic] launched ladder game #{battles_launched}")
-
-        if runner is not None and not runner.done and not active_battles:
-            started_at = runner_started_at or time.time()
-            idle_seconds = time.time() - started_at
-            if idle_seconds >= 45.0:
-                if verbose:
-                    print(
-                        f"[heuristic] idle_without_battle for {idle_seconds:.1f}s; "
-                        f"attempting ladder requeue"
-                    )
-                _safe_requeue_ladder_search(player, phase_label="heuristic", verbose=verbose)
-                runner_started_at = time.time()
-
-        for battle in active_battles:
-            battle_tag = str(getattr(battle, "battle_tag", id(battle)))
-            request_signature = _battle_request_signature(battle)
-            if last_prompted_request.get(battle_tag) == request_signature:
-                continue
-
-            try:
-                state = parse_battle_to_state(battle)
-            except Exception as exc:
-                if verbose:
-                    print(
-                        f"[heuristic] parse_state_failed battle={battle_tag} "
-                        f"error={type(exc).__name__}: {exc}. Sending default order."
-                    )
-                if hasattr(player, "set_pending_order"):
-                    player.set_pending_order(battle_tag, _default_order(player))
-                last_prompted_request[battle_tag] = request_signature
-                continue
-            if not _has_actionable_request(state, battle):
-                continue
-
-            turn_suggestions = (
-                get_turn_suggestions(state, mechanics, top_k=top_k, model=None)
-                if state.legal_actions
-                else []
-            )
-            chosen_order, chosen_action_id = _choose_order_for_request(
-                player,
-                battle,
-                state,
-                turn_suggestions,
-            )
-
-            if verbose and print_turn_suggestions:
-                _print_turn_suggestions(
-                    "heuristic",
-                    battle_tag,
-                    state,
-                    turn_suggestions,
-                    chosen_action_id,
-                    max_suggestions=resolved_print_top_k,
-                )
-
-            if hasattr(player, "set_pending_order"):
-                player.set_pending_order(battle_tag, chosen_order)
-
-            should_log_decision = bool(state.legal_actions) and chosen_action_id != "default"
-            if should_log_decision and decisions_collected < resolved_budget:
-                pending_by_battle.setdefault(battle_tag, []).append((state, chosen_action_id))
-                decisions_collected += 1
-
-            if should_log_decision:
-                decisions_played += 1
-            last_prompted_request[battle_tag] = request_signature
-            if (
-                verbose
-                and should_log_decision
-                and print_every_decisions > 0
-                and decisions_collected % int(print_every_decisions) == 0
-            ):
-                _print_collection_progress(
-                    "heuristic",
-                    cycle_id=int(cycle_id),
-                    decisions_collected=int(decisions_collected),
-                    decision_budget=int(resolved_budget),
-                    decisions_played=int(decisions_played),
-                    battles_launched=int(battles_launched),
-                    battles_finished=int(battles_finished),
-                )
-
-        if (
-            decisions_collected >= resolved_budget
-            and not active_battles
-            and runner is None
-            and not pending_by_battle
-        ):
-            break
-
-        if not can_launch_more and not active_battles and runner is None and not pending_by_battle:
-            break
-
-        time.sleep(0.1)
-
-    for battle_tag, buffered in list(pending_by_battle.items()):
-        for state, chosen_action_id in buffered:
-            _safe_write_decision_record(
-                output_path,
-                state=state,
-                chosen_action_id=chosen_action_id,
-                outcome_value=0.0,
-                metadata={
-                    "source": "heuristic",
-                    "cycle_id": int(cycle_id),
-                    "battle_result": "unknown",
-                },
-                phase_label="heuristic",
-            )
-        pending_by_battle.pop(battle_tag, None)
-
-    if verbose:
-        _print_collection_progress(
-            "heuristic",
-            cycle_id=int(cycle_id),
-            decisions_collected=int(decisions_collected),
-            decision_budget=int(resolved_budget),
-            decisions_played=int(decisions_played),
-            battles_launched=int(battles_launched),
-            battles_finished=int(battles_finished),
-        )
-
-    return {
-        "source": "heuristic",
-        "cycle_id": cycle_id,
-        "decision_budget": int(resolved_budget),
-        "decisions_collected": int(decisions_collected),
-        "decisions_played": int(decisions_played),
-        "battles_launched": int(battles_launched),
-        "battles_finished": int(battles_finished),
-    }
-
-
-def run_model_training_battle(
-    player: Any,
-    *,
-    mechanics: MechanicsAPI,
-    model: ModelBonusFn,
-    top_k: int = 3,
-    max_turns: int | None = None,
-    decision_budget: int | None = None,
-    log_path: str | Path = "training/battle_logs.jsonl",
-    cycle_id: int = 1,
+    cycle_id: int | None = None,
     model_checkpoint: str | None = None,
     n_games: int | None = None,
     verbose: bool = True,
@@ -1170,12 +617,20 @@ def run_model_training_battle(
     print_top_k: int | None = None,
     print_turn_suggestions: bool = True,
 ) -> dict[str, Any]:
+    if source not in {"heuristic", "model"}:
+        raise ValueError("source must be 'heuristic' or 'model'")
+    if source == "model" and model is None:
+        raise ValueError("model callable is required when source='model'")
+
+    phase_label = source
+    model_bonus = model if source == "model" else None
+    resolved_cycle_id = int(cycle_id if cycle_id is not None else (1 if source == "model" else 0))
 
     resolved_budget = int(decision_budget if decision_budget is not None else (max_turns or 1000))
     resolved_print_top_k = int(print_top_k if print_top_k is not None else top_k)
     if resolved_budget <= 0:
         return {
-            "source": "model",
+            "source": source,
             "cycle_id": cycle_id,
             "decision_budget": 0,
             "decisions_collected": 0,
@@ -1189,10 +644,16 @@ def run_model_training_battle(
     _safe_reset_battles(player)
 
     if verbose:
-        print(
-            f"[model] start cycle={cycle_id} decision_budget={resolved_budget} "
-            f"log_path={output_path} checkpoint={model_checkpoint}"
-        )
+        if source == "heuristic":
+            print(
+                f"[heuristic] start cycle={resolved_cycle_id} decision_budget={resolved_budget} "
+                f"log_path={output_path}"
+            )
+        else:
+            print(
+                f"[model] start cycle={resolved_cycle_id} decision_budget={resolved_budget} "
+                f"log_path={output_path} checkpoint={model_checkpoint}"
+            )
 
     runner: AsyncConnectionRunner | None = None
     runner_started_at: float | None = None
@@ -1209,7 +670,7 @@ def run_model_training_battle(
         runner = _resolve_runner_state(
             runner,
             player=player,
-            phase_label="model",
+            phase_label=phase_label,
             verbose=verbose,
         )
         if runner is None:
@@ -1226,11 +687,11 @@ def run_model_training_battle(
             buffered = pending_by_battle.pop(battle_tag_str, [])
             for state, chosen_action_id in buffered:
                 metadata: dict[str, Any] = {
-                    "source": "model",
-                    "cycle_id": int(cycle_id),
+                    "source": source,
+                    "cycle_id": resolved_cycle_id,
                     "battle_result": battle_result,
                 }
-                if model_checkpoint is not None:
+                if source == "model" and model_checkpoint is not None:
                     metadata["model_checkpoint"] = model_checkpoint
                 _safe_write_decision_record(
                     output_path,
@@ -1238,7 +699,7 @@ def run_model_training_battle(
                     chosen_action_id=chosen_action_id,
                     outcome_value=outcome_value,
                     metadata=metadata,
-                    phase_label="model",
+                    phase_label=phase_label,
                 )
 
             finished_tags.add(battle_tag_str)
@@ -1246,10 +707,10 @@ def run_model_training_battle(
             battles_finished += 1
             if verbose:
                 print(
-                    f"[model] battle_finished tag={battle_tag_str} result={battle_result} "
+                    f"[{phase_label}] battle_finished tag={battle_tag_str} result={battle_result} "
                     f"buffered_decisions={len(buffered)}"
                 )
-            _safe_cleanup_finished_battle(player, battle_tag_str, phase_label="model", verbose=verbose)
+            _safe_cleanup_finished_battle(player, battle_tag_str, phase_label=phase_label, verbose=verbose)
 
         active_battles = [battle for battle in battles.values() if not getattr(battle, "finished", False)]
         can_launch_more = decisions_collected < resolved_budget and (
@@ -1261,7 +722,7 @@ def run_model_training_battle(
             runner_started_at = time.time()
             battles_launched += 1
             if verbose:
-                print(f"[model] launched ladder game #{battles_launched}")
+                print(f"[{phase_label}] launched ladder game #{battles_launched}")
 
         if runner is not None and not runner.done and not active_battles:
             started_at = runner_started_at or time.time()
@@ -1269,10 +730,10 @@ def run_model_training_battle(
             if idle_seconds >= 45.0:
                 if verbose:
                     print(
-                        f"[model] idle_without_battle for {idle_seconds:.1f}s; "
+                        f"[{phase_label}] idle_without_battle for {idle_seconds:.1f}s; "
                         f"attempting ladder requeue"
                     )
-                _safe_requeue_ladder_search(player, phase_label="model", verbose=verbose)
+                _safe_requeue_ladder_search(player, phase_label=phase_label, verbose=verbose)
                 runner_started_at = time.time()
 
         for battle in active_battles:
@@ -1286,7 +747,7 @@ def run_model_training_battle(
             except Exception as exc:
                 if verbose:
                     print(
-                        f"[model] parse_state_failed battle={battle_tag} "
+                        f"[{phase_label}] parse_state_failed battle={battle_tag} "
                         f"error={type(exc).__name__}: {exc}. Sending default order."
                     )
                 if hasattr(player, "set_pending_order"):
@@ -1297,7 +758,7 @@ def run_model_training_battle(
                 continue
 
             turn_suggestions = (
-                get_turn_suggestions(state, mechanics, top_k=top_k, model=model)
+                get_turn_suggestions(state, mechanics, top_k=top_k, model=model_bonus)
                 if state.legal_actions
                 else []
             )
@@ -1310,7 +771,7 @@ def run_model_training_battle(
 
             if verbose and print_turn_suggestions:
                 _print_turn_suggestions(
-                    "model",
+                    phase_label,
                     battle_tag,
                     state,
                     turn_suggestions,
@@ -1336,8 +797,8 @@ def run_model_training_battle(
                 and decisions_collected % int(print_every_decisions) == 0
             ):
                 _print_collection_progress(
-                    "model",
-                    cycle_id=int(cycle_id),
+                    phase_label,
+                    cycle_id=resolved_cycle_id,
                     decisions_collected=int(decisions_collected),
                     decision_budget=int(resolved_budget),
                     decisions_played=int(decisions_played),
@@ -1360,12 +821,12 @@ def run_model_training_battle(
 
     for battle_tag, buffered in list(pending_by_battle.items()):
         for state, chosen_action_id in buffered:
-            metadata: dict[str, Any] = {
-                "source": "model",
-                "cycle_id": int(cycle_id),
+            metadata = {
+                "source": source,
+                "cycle_id": resolved_cycle_id,
                 "battle_result": "unknown",
             }
-            if model_checkpoint is not None:
+            if source == "model" and model_checkpoint is not None:
                 metadata["model_checkpoint"] = model_checkpoint
             _safe_write_decision_record(
                 output_path,
@@ -1373,14 +834,14 @@ def run_model_training_battle(
                 chosen_action_id=chosen_action_id,
                 outcome_value=0.0,
                 metadata=metadata,
-                phase_label="model",
+                phase_label=phase_label,
             )
         pending_by_battle.pop(battle_tag, None)
 
     if verbose:
         _print_collection_progress(
-            "model",
-            cycle_id=int(cycle_id),
+            phase_label,
+            cycle_id=resolved_cycle_id,
             decisions_collected=int(decisions_collected),
             decision_budget=int(resolved_budget),
             decisions_played=int(decisions_played),
@@ -1389,8 +850,8 @@ def run_model_training_battle(
         )
 
     return {
-        "source": "model",
-        "cycle_id": cycle_id,
+        "source": source,
+        "cycle_id": resolved_cycle_id,
         "decision_budget": int(resolved_budget),
         "decisions_collected": int(decisions_collected),
         "decisions_played": int(decisions_played),
@@ -1398,38 +859,9 @@ def run_model_training_battle(
         "battles_finished": int(battles_finished),
     }
 
-
-def connect_to_battle(
-    player: Any,
-    *,
-    max_turns: int | None = None,
-    n_games: int | None = 1,
-) -> Any:
-
-    runner = AsyncConnectionRunner(player, n_games).start()
-    wait_loops = max_turns or 1000
-
-    for _ in range(wait_loops):
-        runner = _resolve_runner_state(
-            runner,
-            player=player,
-            phase_label="connect",
-            verbose=True,
-        )
-        battle = get_battle(player)
-        if battle is not None:
-            bot_name = getattr(battle, "player_username", None) or getattr(player, "username", None) or "unknown"
-            human_name = getattr(battle, "opponent_username", None) or "unknown"
-            battle_tag = getattr(battle, "battle_tag", "unknown")
-            print(f"Live battle connected: bot='{bot_name}' vs human='{human_name}' (tag={battle_tag})")
-            return battle
-
-        if runner is None:
-            runner = AsyncConnectionRunner(player, n_games).start()
-        time.sleep(0.2)
-
-    print("Timed out waiting for a live battle object.")
-    return None
+# ========================================
+# Application Entrypoint
+# ========================================
 
 
 def main() -> int:
@@ -1441,20 +873,9 @@ def main() -> int:
 
     player = pokeEnvPlayerInfo()
     mechanics = MechanicsAPI()
-
-    # DIFFERENT BATTLE TYPES, uncomment whichever one we run.
-
-    # connect_to_battle(player, max_turns=100)
     # run_battle(player, mechanics=mechanics, top_k=3, model=None, max_turns=100)
-    #run_test_battle(player, max_turns=100000)
-    # run_heuristic_training_battle(
-    #     player,
-    #     mechanics=mechanics,
-    #     top_k=3,
-    #     decision_budget=20_000,
-    #     n_games=None,
-    # )
 
+    # TRAINING CYCLE:
     # Alright, after setting up automatic logging, the training battle loops, and everything else,
     # This is how we run the full training cycle. 
     # 1. If there are no logs, run heuristic training first to generate initial data
@@ -1479,7 +900,7 @@ def main() -> int:
         mechanics,
     )
     print(f"Training status: {training_report['status']}")
-    # run_model_training_battle(player, mechanics=MechanicsAPI(), model=None, top_k=3, max_turns=100000)
+
 
     return 0
 

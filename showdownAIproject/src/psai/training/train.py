@@ -28,6 +28,12 @@ else:
 from psai.training.dataset import BattleLogRecord, records_to_numpy
 from psai.training.model import PolicyValueMLP
 from psai.decision.chooser import ModelBonusFn
+from psai.app.connections import (
+    AsyncConnectionRunner,
+    _resolve_runner_state,
+    _safe_cleanup_finished_battle,
+    _safe_requeue_ladder_search,
+)
 from psai.domain.state import LegalAction, State, parse_battle_to_state
 from psai.mechanics.api import MechanicsAPI
 from psai.training.dataset import encode_state, read_log_records
@@ -310,9 +316,10 @@ def run_training_cycle(
                 f"existing={heuristic_records}/{bootstrap_target} "
                 f"remaining={bootstrap_remaining}"
             )
-        bootstrap_result = app_main.run_heuristic_training_battle(
+        bootstrap_result = app_main.run_training_battle(
             player,
             mechanics=mechanics,
+            source="heuristic",
             decision_budget=bootstrap_remaining,
             log_path=log_path,
             cycle_id=0,
@@ -357,9 +364,10 @@ def run_training_cycle(
         if config.heuristic_refresh_decisions > 0:
             if config.verbose:
                 print(f"[loop] heuristic refresh target={config.heuristic_refresh_decisions}")
-            app_main.run_heuristic_training_battle(
+            app_main.run_training_battle(
                 player,
                 mechanics=mechanics,
+                source="heuristic",
                 decision_budget=config.heuristic_refresh_decisions,
                 log_path=log_path,
                 cycle_id=cycle_id,
@@ -389,9 +397,10 @@ def run_training_cycle(
         model_bonus = build_model_bonus_fn(model, weight=config.model_bonus_weight)
         if config.verbose:
             print(f"[loop] model self-play collection target={config.model_cycle_decisions}")
-        model_collection = app_main.run_model_training_battle(
+        model_collection = app_main.run_training_battle(
             player,
             mechanics=mechanics,
+            source="model",
             decision_budget=config.model_cycle_decisions,
             log_path=log_path,
             cycle_id=cycle_id,
@@ -427,7 +436,7 @@ def run_training_cycle(
             last_prompted_request: dict[str, tuple[Any, ...]] = {}
 
             while True:
-                runner = app_main._resolve_runner_state(
+                runner = _resolve_runner_state(
                     runner,
                     player=player,
                     phase_label="eval",
@@ -450,7 +459,7 @@ def run_training_cycle(
                     counted_tags.add(battle_tag)
                     games_finished += 1
                     last_prompted_request.pop(battle_tag, None)
-                    app_main._safe_cleanup_finished_battle(
+                    _safe_cleanup_finished_battle(
                         player,
                         str(battle_tag),
                         phase_label="eval",
@@ -468,7 +477,7 @@ def run_training_cycle(
 
                 active_battles = [battle for battle in battles.values() if not getattr(battle, "finished", False)]
                 if runner is None and not active_battles and games_launched < config.eval_games:
-                    runner = app_main.AsyncConnectionRunner(player, 1).start()
+                    runner = AsyncConnectionRunner(player, 1).start()
                     runner_started_at = time.time()
                     games_launched += 1
 
@@ -481,7 +490,7 @@ def run_training_cycle(
                                 f"[eval] idle_without_battle for {idle_seconds:.1f}s; "
                                 f"attempting ladder requeue"
                             )
-                        app_main._safe_requeue_ladder_search(
+                        _safe_requeue_ladder_search(
                             player,
                             phase_label="eval",
                             verbose=config.verbose,
