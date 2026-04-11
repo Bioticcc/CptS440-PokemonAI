@@ -145,7 +145,8 @@ def _safe_requeue_ladder_search(
             listener_done = True
 
     websocket = getattr(ps_client, "websocket", None)
-    websocket_closed = bool(getattr(websocket, "closed", True))
+    websocket_close_code = getattr(websocket, "close_code", None) if websocket is not None else None
+    websocket_closed = websocket is None or websocket_close_code is not None
     if listener_done or websocket_closed:
         _safe_restart_showdown_listener(player, phase_label=phase_label, verbose=verbose)
 

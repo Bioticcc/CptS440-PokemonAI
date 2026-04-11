@@ -28,7 +28,7 @@ cd /home/jeezu/CptS440-PokemonAI
 git checkout main
 git status
 git add .
-git commit -m "restarts after server disconnect"
+git commit -m "fixed infinite restart loop >.>"
 git push origin main
 git rev-parse --short HEAD
 ## PULL
