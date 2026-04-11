@@ -136,6 +136,19 @@ def _safe_requeue_ladder_search(
     if ps_client is None or not callable(search_ladder_game):
         return False
 
+    listening_future = getattr(ps_client, "_listening_coroutine", None)
+    listener_done = True
+    if listening_future is not None:
+        try:
+            listener_done = bool(listening_future.done())
+        except Exception:
+            listener_done = True
+
+    websocket = getattr(ps_client, "websocket", None)
+    websocket_closed = bool(getattr(websocket, "closed", True))
+    if listener_done or websocket_closed:
+        _safe_restart_showdown_listener(player, phase_label=phase_label, verbose=verbose)
+
     battle_format = str(getattr(player, "format", "") or getattr(player, "_configured_battle_format", "gen1randombattle"))
     team = getattr(player, "next_team", None)
     if callable(team):
@@ -144,16 +157,28 @@ def _safe_requeue_ladder_search(
         except Exception:
             team = None
 
-    try:
+    def _attempt_requeue() -> None:
         future = asyncio.run_coroutine_threadsafe(
             search_ladder_game(battle_format, team),
             POKE_LOOP,
         )
         future.result(timeout=5.0)
+
+    try:
+        _attempt_requeue()
         if verbose:
             print(f"[{phase_label}] requeued ladder search format={battle_format}")
         return True
     except Exception as exc:
+        if _is_recoverable_connection_error(exc):
+            _safe_restart_showdown_listener(player, phase_label=phase_label, verbose=verbose)
+            try:
+                _attempt_requeue()
+                if verbose:
+                    print(f"[{phase_label}] requeued ladder search after reconnect format={battle_format}")
+                return True
+            except Exception as retry_exc:
+                exc = retry_exc
         if verbose:
             print(
                 f"[{phase_label}] requeue_failed error={type(exc).__name__}: {exc}"
