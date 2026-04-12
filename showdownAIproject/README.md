@@ -28,7 +28,7 @@ cd /home/jeezu/CptS440-PokemonAI
 git checkout main
 git status
 git add .
-git commit -m "fixed infinite requeue loop hopefully"
+git commit -m "doubtful this one works, but we shall see"
 git push origin main
 git rev-parse --short HEAD
 ## PULL

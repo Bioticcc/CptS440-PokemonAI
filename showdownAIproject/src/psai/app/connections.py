@@ -148,15 +148,24 @@ def _safe_requeue_ladder_search(
     websocket_close_code = getattr(websocket, "close_code", None) if websocket is not None else None
     websocket_closed = websocket is None or websocket_close_code is not None
     connection_healthy = not listener_done and not websocket_closed
+    now = time.time()
+    healthy_probe_interval_seconds = 120.0
     if connection_healthy:
-        if verbose:
-            print(
-                f"[{phase_label}] queue appears healthy; "
-                f"skipping forced requeue"
-            )
-        return True
-
-    _safe_restart_showdown_listener(player, phase_label=phase_label, verbose=verbose)
+        last_healthy_probe_at = float(getattr(player, "_healthy_requeue_probe_at", 0.0) or 0.0)
+        if now - last_healthy_probe_at < healthy_probe_interval_seconds:
+            if verbose:
+                cooldown_left = healthy_probe_interval_seconds - (now - last_healthy_probe_at)
+                print(
+                    f"[{phase_label}] queue appears healthy; "
+                    f"skipping forced requeue (cooldown {cooldown_left:.0f}s)"
+                )
+            return True
+        try:
+            setattr(player, "_healthy_requeue_probe_at", now)
+        except Exception:
+            pass
+    else:
+        _safe_restart_showdown_listener(player, phase_label=phase_label, verbose=verbose)
 
     battle_format = str(getattr(player, "format", "") or getattr(player, "_configured_battle_format", "gen1randombattle"))
     team = getattr(player, "next_team", None)
@@ -167,8 +176,8 @@ def _safe_requeue_ladder_search(
             team = None
     send_message = getattr(ps_client, "send_message", None)
 
-    def _attempt_requeue() -> None:
-        if callable(send_message):
+    def _attempt_requeue(*, cancel_first: bool) -> None:
+        if cancel_first and callable(send_message):
             try:
                 cancel_future = asyncio.run_coroutine_threadsafe(
                     send_message("/cancelsearch"),
@@ -184,15 +193,21 @@ def _safe_requeue_ladder_search(
         future.result(timeout=5.0)
 
     try:
-        _attempt_requeue()
+        _attempt_requeue(cancel_first=not connection_healthy)
         if verbose:
-            print(f"[{phase_label}] requeued ladder search format={battle_format}")
+            if connection_healthy:
+                print(
+                    f"[{phase_label}] requeue probe sent while healthy "
+                    f"format={battle_format}"
+                )
+            else:
+                print(f"[{phase_label}] requeued ladder search format={battle_format}")
         return True
     except Exception as exc:
         if _is_recoverable_connection_error(exc):
             _safe_restart_showdown_listener(player, phase_label=phase_label, verbose=verbose)
             try:
-                _attempt_requeue()
+                _attempt_requeue(cancel_first=True)
                 if verbose:
                     print(f"[{phase_label}] requeued ladder search after reconnect format={battle_format}")
                 return True
