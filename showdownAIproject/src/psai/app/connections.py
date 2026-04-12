@@ -147,8 +147,16 @@ def _safe_requeue_ladder_search(
     websocket = getattr(ps_client, "websocket", None)
     websocket_close_code = getattr(websocket, "close_code", None) if websocket is not None else None
     websocket_closed = websocket is None or websocket_close_code is not None
-    if listener_done or websocket_closed:
-        _safe_restart_showdown_listener(player, phase_label=phase_label, verbose=verbose)
+    connection_healthy = not listener_done and not websocket_closed
+    if connection_healthy:
+        if verbose:
+            print(
+                f"[{phase_label}] queue appears healthy; "
+                f"skipping forced requeue"
+            )
+        return True
+
+    _safe_restart_showdown_listener(player, phase_label=phase_label, verbose=verbose)
 
     battle_format = str(getattr(player, "format", "") or getattr(player, "_configured_battle_format", "gen1randombattle"))
     team = getattr(player, "next_team", None)
@@ -157,8 +165,18 @@ def _safe_requeue_ladder_search(
             team = team()
         except Exception:
             team = None
+    send_message = getattr(ps_client, "send_message", None)
 
     def _attempt_requeue() -> None:
+        if callable(send_message):
+            try:
+                cancel_future = asyncio.run_coroutine_threadsafe(
+                    send_message("/cancelsearch"),
+                    POKE_LOOP,
+                )
+                cancel_future.result(timeout=2.0)
+            except Exception:
+                pass
         future = asyncio.run_coroutine_threadsafe(
             search_ladder_game(battle_format, team),
             POKE_LOOP,

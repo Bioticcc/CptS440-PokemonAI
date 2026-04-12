@@ -489,7 +489,7 @@ def run_training_cycle(
                 if runner is not None and not runner.done and not active_battles:
                     started_at = runner_started_at or time.time()
                     idle_seconds = time.time() - started_at
-                    if idle_seconds >= 45.0:
+                    if idle_seconds >= 180.0:
                         if config.verbose:
                             print(
                                 f"[eval] idle_without_battle for {idle_seconds:.1f}s; "
