@@ -4,6 +4,11 @@
 # This file handles optimization, metrics, and checkpoint save/load for
 # training from baseline battle logs.
 
+
+# ========================================
+# Imports
+# ========================================
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
@@ -40,6 +45,11 @@ from psai.mechanics.api import MechanicsAPI
 from psai.training.dataset import encode_state, read_log_records
 
 
+
+# ========================================
+# Dataclasses
+# ========================================
+
 @dataclass(slots=True)
 class TrainConfig:
 
@@ -54,6 +64,32 @@ class TrainConfig:
     checkpoint_path: str | None = None # where to save models during training, if needed.
     verbose: bool = True
 
+
+@dataclass(slots=True)
+class TrainingLoopConfig:
+    log_path: str = "training/battle_logs.jsonl"
+    artifact_dir: str = "training/artifacts"
+    bootstrap_decisions: int = 20_000
+    heuristic_refresh_decisions: int = 0
+    model_cycle_decisions: int = 10_000
+    eval_games: int = 100
+    eval_min_win_rate: float = 0.50
+    model_bonus_weight: float = 120.0
+    max_cycles: int = 1
+    model_hidden_sizes: tuple[int, ...] = (128, 64)
+    train_config: TrainConfig = field(default_factory=TrainConfig)
+    collection_n_games: int | None = None
+    verbose: bool = True
+    print_turn_suggestions: bool = True
+    print_top_k: int = 3
+    print_every_decisions: int = 100
+    eval_print_every_games: int = 10
+
+
+
+# ========================================
+# Helpers / Smaller Functions
+# ========================================
 
 def _require_torch() -> None: # guard
     if torch is None:
@@ -103,120 +139,6 @@ def load_checkpoint(
     if optimizer is not None and "optimizer_state_dict" in payload:
         optimizer.load_state_dict(payload["optimizer_state_dict"])
     return payload
-
-
-def train_policy_value(
-    model: PolicyValueMLP,
-    records: Sequence[BattleLogRecord],
-    *,
-    config: TrainConfig | None = None,
-    optimizer: Any | None = None,
-) -> dict[str, Any]:
-
-    # The main training loop! Here we take in the model and train a policy value model using the battle log records
-
-    _require_torch()
-
-    cfg = config or TrainConfig() # set config
-    arrays = records_to_numpy(records, action_dim=model.action_dim) # converts records to arrays
-    if arrays["state"].shape[0] == 0: # if no records cant train
-        raise ValueError("No records provided for training.")
-
-    device = torch.device(cfg.device) # 
-    state_tensor = torch.as_tensor(arrays["state"], dtype=torch.float32, device=device)
-    policy_tensor = torch.as_tensor(arrays["policy"], dtype=torch.float32, device=device)
-    value_tensor = torch.as_tensor(arrays["value"], dtype=torch.float32, device=device).squeeze(-1)
-    mask_tensor = torch.as_tensor(arrays["mask"], dtype=torch.float32, device=device)
-
-    dataset = TensorDataset(state_tensor, policy_tensor, value_tensor, mask_tensor)
-    loader = DataLoader(dataset, batch_size=max(1, cfg.batch_size), shuffle=True)
-
-    model.to(device)
-    model.train()
-
-    if optimizer is None:
-        optimizer = torch.optim.Adam(
-            model.parameters(),
-            lr=cfg.learning_rate,
-            weight_decay=cfg.weight_decay,
-        )
-
-    metrics: dict[str, list[float]] = {
-        "policy_loss": [],
-        "value_loss": [],
-        "total_loss": [],
-    }
-
-    for epoch in range(cfg.epochs):
-        epoch_policy_loss = 0.0
-        epoch_value_loss = 0.0
-        epoch_total_loss = 0.0
-        batch_count = 0
-
-        for state_batch, policy_batch, value_batch, mask_batch in loader:
-            optimizer.zero_grad()
-
-            logits, value_pred = model(state_batch, action_mask=mask_batch)
-            log_probs = torch.log_softmax(logits, dim=-1)
-            policy_loss = -(policy_batch * log_probs).sum(dim=-1).mean()
-            value_loss = F.mse_loss(value_pred, value_batch)
-            total_loss = policy_loss + (cfg.value_loss_weight * value_loss)
-
-            total_loss.backward()
-            optimizer.step()
-
-            epoch_policy_loss += float(policy_loss.item())
-            epoch_value_loss += float(value_loss.item())
-            epoch_total_loss += float(total_loss.item())
-            batch_count += 1
-
-        denom = max(1, batch_count)
-        metrics["policy_loss"].append(epoch_policy_loss / denom)
-        metrics["value_loss"].append(epoch_value_loss / denom)
-        metrics["total_loss"].append(epoch_total_loss / denom)
-        if cfg.verbose:
-            print(
-                f"[train] epoch {epoch + 1}/{cfg.epochs} "
-                f"policy_loss={metrics['policy_loss'][-1]:.4f} "
-                f"value_loss={metrics['value_loss'][-1]:.4f} "
-                f"total_loss={metrics['total_loss'][-1]:.4f}"
-            )
-
-    if cfg.checkpoint_path:
-        save_checkpoint(
-            cfg.checkpoint_path,
-            model,
-            optimizer,
-            epoch=cfg.epochs,
-            metrics=metrics,
-        )
-
-    return {
-        "epochs": cfg.epochs,
-        "num_records": len(records),
-        "metrics": metrics,
-    }
-
-
-@dataclass(slots=True)
-class TrainingLoopConfig:
-    log_path: str = "training/battle_logs.jsonl"
-    artifact_dir: str = "training/artifacts"
-    bootstrap_decisions: int = 20_000
-    heuristic_refresh_decisions: int = 0
-    model_cycle_decisions: int = 10_000
-    eval_games: int = 100
-    eval_min_win_rate: float = 0.50
-    model_bonus_weight: float = 120.0
-    max_cycles: int = 1
-    model_hidden_sizes: tuple[int, ...] = (128, 64)
-    train_config: TrainConfig = field(default_factory=TrainConfig)
-    collection_n_games: int | None = None
-    verbose: bool = True
-    print_turn_suggestions: bool = True
-    print_top_k: int = 3
-    print_every_decisions: int = 100
-    eval_print_every_games: int = 10
 
 
 def _normalize_features_for_model(features: list[float], input_dim: int) -> list[float]:
@@ -283,40 +205,163 @@ def _count_heuristic_records(records: Sequence[BattleLogRecord]) -> int:
     return total
 
 
+
+# ========================================
+# Main Functions
+# ========================================
+
+def train_policy_value(
+    model: PolicyValueMLP,
+    records: Sequence[BattleLogRecord],
+    *,
+    config: TrainConfig | None = None,
+    optimizer: Any | None = None,
+) -> dict[str, Any]:
+
+    # The main training loop! Here we take in the model and train a policy value model using the battle log records
+    # More explanation:
+    # Input: the 10 numeric state features we make in dataset.py, and which of the 4 action slots are legal (mask)
+    # Output: Policy - probabilities for each of the 4 action slots, Value - number from -1 to 1 meaning how good this state is
+
+    # So essentially its learning 
+    # - In states like x, which move slots get chosen the most?
+    # - In states like x, do we end up winning or losing?
+
+    # Then using this, we can see clear patterns of good and bad moves that cause good and bad states.
+    # The model then makes its own "weights" that are essentially the models personal heuristics scores
+    # For various moves. It is NOT the same thing as heuristics, but it is a good way of thinking about it
+
+    _require_torch()
+
+    cfg = config or TrainConfig() # set config
+    arrays = records_to_numpy(records, action_dim=model.action_dim) # converts records to arrays
+    if arrays["state"].shape[0] == 0: # if no records cant train
+        raise ValueError("No records provided for training.")
+
+    device = torch.device(cfg.device) # gpu or cpu
+    state_tensor = torch.as_tensor(arrays["state"], dtype=torch.float32, device=device)
+    policy_tensor = torch.as_tensor(arrays["policy"], dtype=torch.float32, device=device)
+    value_tensor = torch.as_tensor(arrays["value"], dtype=torch.float32, device=device).squeeze(-1)
+    mask_tensor = torch.as_tensor(arrays["mask"], dtype=torch.float32, device=device)
+
+    dataset = TensorDataset(state_tensor, policy_tensor, value_tensor, mask_tensor)
+    loader = DataLoader(dataset, batch_size=max(1, cfg.batch_size), shuffle=True)
+
+    model.to(device) # just saying gpu or cpu
+    model.train() # switches model to training mode
+
+    if optimizer is None: # optimizers are the update rule for the weights. This is the one that edits those personal heuristic values
+        optimizer = torch.optim.Adam( # uses gradients to update the weights
+            model.parameters(),
+            lr=cfg.learning_rate,
+            weight_decay=cfg.weight_decay,
+        )
+
+    metrics: dict[str, list[float]] = {
+        "policy_loss": [],
+        "value_loss": [],
+        "total_loss": [],
+    }
+
+    for epoch in range(cfg.epochs): # Loop through each of our epcochs and train on whole dataset
+        epoch_policy_loss = 0.0
+        epoch_value_loss = 0.0
+        epoch_total_loss = 0.0
+        batch_count = 0
+
+        for state_batch, policy_batch, value_batch, mask_batch in loader:
+            optimizer.zero_grad() # resets gradients from optimizer
+
+            logits, value_pred = model(state_batch, action_mask=mask_batch) # gets logits and actionscores
+            log_probs = torch.log_softmax(logits, dim=-1) # turns scores into log probabilities
+            
+            # Penalities! here we punish the model if its bad
+            policy_loss = -(policy_batch * log_probs).sum(dim=-1).mean() # this gives a penalty for mismatch between predicted move and target move
+            value_loss = F.mse_loss(value_pred, value_batch) # mismatch between predicted value and target outcome
+            total_loss = policy_loss + (cfg.value_loss_weight * value_loss)
+
+            total_loss.backward() # computes the gradients with the optimizer
+            optimizer.step() # applies weight gradients
+
+            # append the average losses for this batch to the epoch totals
+            epoch_policy_loss += float(policy_loss.item()) 
+            epoch_value_loss += float(value_loss.item())
+            epoch_total_loss += float(total_loss.item())
+            batch_count += 1
+
+        denom = max(1, batch_count) # guard to avoid div by 0
+
+        # at the end of an epoch, append to metrics those averages above.
+        metrics["policy_loss"].append(epoch_policy_loss / denom)
+        metrics["value_loss"].append(epoch_value_loss / denom)
+        metrics["total_loss"].append(epoch_total_loss / denom)
+
+        if cfg.verbose: # print losses for the epoch, this is just logging stuff
+            print(
+                f"[train] epoch {epoch + 1}/{cfg.epochs} "
+                f"policy_loss={metrics['policy_loss'][-1]:.4f} "
+                f"value_loss={metrics['value_loss'][-1]:.4f} "
+                f"total_loss={metrics['total_loss'][-1]:.4f}"
+            )
+
+    # Save model + optimizer + metrics
+    if cfg.checkpoint_path:
+        save_checkpoint(
+            cfg.checkpoint_path,
+            model,
+            optimizer,
+            epoch=cfg.epochs,
+            metrics=metrics,
+        )
+
+    # return the number of epochs we ran, the number of input records, and metrics summary.
+    return {
+        "epochs": cfg.epochs,
+        "num_records": len(records),
+        "metrics": metrics,
+    }
+
 def run_training_cycle(
     config: TrainingLoopConfig,
     player: Any,
     mechanics: MechanicsAPI,
 ) -> dict[str, Any]:
-    from psai.app import main as app_main
+    from psai.app import main as app_main # IMPORT! only reason its not at the top is to avoid circular imports
 
+    # Getting the paths to all of our important info
     log_path = Path(config.log_path)
     artifact_dir = Path(config.artifact_dir)
     checkpoints_dir = artifact_dir / "checkpoints"
     metrics_dir = artifact_dir / "metrics"
     best_pointer_path = artifact_dir / "best_model.json"
 
+    # making the required directories exist, and if they dont, make em automatically.
     log_path.parent.mkdir(parents=True, exist_ok=True)
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
     metrics_dir.mkdir(parents=True, exist_ok=True)
 
-    records = read_log_records(log_path)
+
+    # THIS WHOLE SECTION IS FOR RESUMING AFTER FAILED RUNS.
+    # Ideally, wont be needed anymore as I THINK(maybe(perhaps)) I have fixed the issues
+    # causing the errors and network problems, but I think its best to leave this in 
+    # in case we want more heuristics later.
+    records = read_log_records(log_path) # gets the records
     bootstrap_result: dict[str, Any] | None = None
-    if config.verbose:
+    if config.verbose: # prints for console logging purposes
         print(
             f"[loop] start log_path={log_path} artifact_dir={artifact_dir} "
             f"existing_records={len(records)} max_cycles={config.max_cycles}"
         )
-    heuristic_records = _count_heuristic_records(records)
-    bootstrap_target = max(0, int(config.bootstrap_decisions))
-    bootstrap_remaining = max(0, bootstrap_target - heuristic_records)
-    if bootstrap_remaining > 0:
-        if config.verbose:
+    heuristic_records = _count_heuristic_records(records) # counts how many heuristics we have
+    bootstrap_target = max(0, int(config.bootstrap_decisions)) # how many heursitic decisions we want before model
+    bootstrap_remaining = max(0, bootstrap_target - heuristic_records) # how many more heuristics we need before model
+    if bootstrap_remaining > 0: # if we need more,
+        if config.verbose: # print
             print(
                 f"[loop] bootstrap heuristic resume "
                 f"existing={heuristic_records}/{bootstrap_target} "
                 f"remaining={bootstrap_remaining}"
-            )
+            ) # and run more heuristics loops until we get to the desired number.
         bootstrap_result = app_main.run_training_battle(
             player,
             mechanics=mechanics,
@@ -337,16 +382,18 @@ def run_training_cycle(
                 f"[loop] bootstrap complete heuristic={heuristic_records}/{bootstrap_target} "
                 f"records={len(records)}"
             )
+    # End of resume related stuff. Onto the hard part!
 
-    if not records:
+
+    if not records: # guard for if records are empty. Means we need to do heuristics first!
         raise ValueError("No training records available after bootstrap stage.")
 
-    best_pointer = _load_best_pointer(best_pointer_path) or {}
-    best_checkpoint = best_pointer.get("checkpoint_path")
-    best_win_rate = float(best_pointer.get("win_rate", -1.0))
+    best_pointer = _load_best_pointer(best_pointer_path) or {} # json record of the best model so far
+    best_checkpoint = best_pointer.get("checkpoint_path") # path of the best model checkpoint
+    best_win_rate = float(best_pointer.get("win_rate", -1.0)) # win rate of the best model so far, default -1 to ensure any model is better than it
 
     input_dim = len(records[0].state_features)
-    model = PolicyValueMLP(
+    model = PolicyValueMLP( # This is from model.py! creates the model object
         input_dim=input_dim,
         hidden_sizes=config.model_hidden_sizes,
         action_dim=4,
@@ -356,15 +403,18 @@ def run_training_cycle(
         if best_checkpoint_path.exists():
             load_checkpoint(best_checkpoint_path, model)
 
-    cycle_reports: list[dict[str, Any]] = []
+    cycle_reports: list[dict[str, Any]] = [] # collection of summary dicts for each cycle
     status = "completed"
 
-    for cycle_id in range(1, int(config.max_cycles) + 1):
+    for cycle_id in range(1, int(config.max_cycles) + 1): # auto reruns training loop until max cycles reached
         if config.verbose:
             print(f"[loop] cycle {cycle_id}/{config.max_cycles} begin")
         if config.heuristic_refresh_decisions > 0:
             if config.verbose:
                 print(f"[loop] heuristic refresh target={config.heuristic_refresh_decisions}")
+            
+            # Runs our training battle from main, heuristics specifically optionally if we need.
+            # DEFAULT IS OFF, btw
             app_main.run_training_battle(
                 player,
                 mechanics=mechanics,
@@ -379,14 +429,19 @@ def run_training_cycle(
                 print_turn_suggestions=config.print_turn_suggestions,
             )
 
+        # after that optional heuristic refresh, here we go! Now we are training for real.
+
         records = read_log_records(log_path)
-        if not records:
+        if not records: # checks again as we might have done the optional extra heuristics and gotten new records
             raise ValueError("Training data unexpectedly missing before model training.")
         if config.verbose:
             print(f"[loop] training model on records={len(records)}")
 
+        # Finds the checkpoint path for this cycle, then calls the train_policy_value function!
         checkpoint_path = checkpoints_dir / f"policy_value_cycle_{cycle_id:04d}.pt"
         cycle_train_config = replace(config.train_config, checkpoint_path=str(checkpoint_path))
+        
+        # train policy value! baller!
         train_result = train_policy_value(model, records, config=cycle_train_config)
         if config.verbose:
             metrics = train_result["metrics"]
@@ -395,10 +450,12 @@ def run_training_cycle(
                 f"last_total_loss={metrics['total_loss'][-1]:.4f} checkpoint={checkpoint_path}"
             )
 
+        # Here we build the model bonus function, which enables the model to 
+        # give extra points to the move slots it thinks are good during self play training.
         model_bonus = build_model_bonus_fn(model, weight=config.model_bonus_weight)
-        if config.verbose:
+        if config.verbose: # console logging yay
             print(f"[loop] model self-play collection target={config.model_cycle_decisions}")
-        model_collection = app_main.run_training_battle(
+        model_collection = app_main.run_training_battle( # Run again, but this time with model selected!
             player,
             mechanics=mechanics,
             source="model",
@@ -413,7 +470,21 @@ def run_training_cycle(
             print_top_k=config.print_top_k,
             print_turn_suggestions=config.print_turn_suggestions,
         )
+        
 
+
+        # Alright, this is where we run evaluation for the model. Frankly, it should be its own function,
+        # I just wanted to have everything in one place and didnt realize until it was too late just how long this section would be.
+        # In the future I will move it to its own function, but for now its here.
+
+        # SO, what is happening here is we are running x games of the ladder, and counting how many wins and losses we get.
+        # We then get a win rate, if it that winrate is below what we expected, it failes the gate and stops the training cycle.
+        # currently max cycles is 1 anyway, but we will increase that later and the gate threshold will probably be lowered. 
+        # Unless by some miracle the model is hitting 50%+ winrate off of the FIRST run, in which case shoot for the stars.
+
+        # Majority of this code is just the various guard code related stuff, and we will probably move it to main. 
+
+        # makes our default evaluate results
         if config.eval_games <= 0:
             evaluation = {"games": 0, "wins": 0, "losses": 0, "ties": 0, "win_rate": 0.0}
         else:
@@ -620,3 +691,9 @@ def run_training_cycle(
         "log_path": str(log_path),
         "artifact_dir": str(artifact_dir),
     }
+
+# ========================================
+# Entrypoint
+# ========================================
+
+# No module entrypoint. This file is imported by psai.app.main.

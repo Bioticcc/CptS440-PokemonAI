@@ -1,5 +1,6 @@
-# Alright, first and foremost we need to confirm weve got the required installs ready:
 
+# ----------------------------------------------
+# Alright, first and foremost we need to confirm weve got the required installs ready:
 ## Run the following in your VS code bash terminal:
 - python3 --version
     - If this gives an error, run: sudo apt update sudo apt install -y python3 python3-venv python3-pip
@@ -13,25 +14,30 @@
 - python -m pip install --upgrade pip wheel setuptools
 - pip install -e . 
     - This now installs the key runtime deps from `pyproject.toml`, including `poke-env` and `torch`.
+# ----------------------------------------------
+
 
 # ----------------------------------------------
 HOW TO RUN: 
-cd /home/jeezu/CptS440-PokemonAI/showdownAIproject
+cd FILEPATHTO/showdownAIproject
 source .venv/bin/activate
 pip install -e .   
 python3 -m psai.app.main
 # ----------------------------------------------
 
+
+# ----------------------------------------------
 # GIT CHANGES:
 ## PUSH
 cd /home/jeezu/CptS440-PokemonAI
 git checkout main
 git status
 git add .
-git commit -m "doubtful this one works, but we shall see"
+git commit -m "bleh"
 git push origin main
 git rev-parse --short HEAD
-## PULL
+
+## PULL Then RUN
 cd /home/kyle/Desktop/Adam/CptS440-PokemonAI
 git checkout main
 git status
@@ -43,15 +49,11 @@ cd showdownAIproject
 source .venv/bin/activate
 pip install -e .
 
-# THEN RUN WITH:
 python3 -m psai.app.main
-
-# INVALID RUN? DELETE ALL LOGS: (THIS MEANS ALL. IF YOU WANT SPECIFIC, DO SPECIFIC.)
-rm -f training/battle_logs.jsonl
-rm -rf training/artifacts
-mkdir -p training/artifacts/checkpoints training/artifacts/metrics
+# ----------------------------------------------
 
 
+# ----------------------------------------------
 ## SPECIFIC ROLES (choose one of these you want for now)
 - Showdown Integration and State Parser
     - What you need to do here is connect to showdown through poke-env (the agent itself is the actual showdown player/client), receive the live battle object each turn, and have a State object class that is updated every turn. State will have parameters like HP%, status, boosts, types, moves (for the enemy pokemon, only the ones that we have seen so far), item/ability if we know it.
@@ -94,8 +96,10 @@ mkdir -p training/artifacts/checkpoints training/artifacts/metrics
     - Needs proper packaging, so maybe something like Electron or Tauri. 
     - VERY IMPORTANT THAT WHOEVERS DOING THIS COORDINATES WITH THE INPUTS ROLE. The UI/control panel and the showdown integration have to work together.
     - DONE IF: We can run a showdown 1v1 through poke-env, open the control panel, get top 3 move suggestions with reasons, confirm a move, and have that move sent to showdown. 
+# ----------------------------------------------
 
 
+# ----------------------------------------------
 ## PRIMARY FILES TO WORK IN: 
 - Showdown Integration and State Parser:
    - src/psai/domain/
@@ -115,8 +119,10 @@ mkdir -p training/artifacts/checkpoints training/artifacts/metrics
 
 - Overlay and Packaging:
    - src/psai/app/
+# ----------------------------------------------
 
 
+# ----------------------------------------------
 ## CURRENT FILE STRUCTURE EXPLANATION:
 What we currently have:
 
@@ -159,14 +165,38 @@ So our "pipeline" is as such:
 - If an error occurs, apply the smallest targeted bugfix only, then rerun and verify.
 - Avoid refactors, architecture moves, or “cleanup” edits to cycle logic during stable runs.
 
+## RECENT STABILITY IMPROVEMENTS (APRIL 2026)
+- Queue/reconnect hardening:
+    - Requeue now checks connection health before deciding how aggressive recovery should be.
+    - Healthy connection: sends periodic low-frequency search probes (cooldown) instead of constant queue spam.
+    - Unhealthy connection: reconnects listener and uses cancel-search + re-search recovery.
+- Battle request deadlock protection:
+    - Pending orders now use normalized battle tags.
+    - `choose_move(...)` has a timeout fallback to default order so a missed pending order cannot block forever.
+- Stalled request retry:
+    - If a battle request signature remains unchanged for too long, runtime retries order submission instead of stalling indefinitely.
+- Timer reliability:
+    - `start_timer_on_battle_start` is enabled.
+    - Runtime also uses a safe, rate-limited `/timer on` enforcement path during active battles.
+- Eval loop parity:
+    - Eval now uses the same core stall/requeue protections as heuristic/model collection.
+- Practical result:
+    - Long overnight runs are now significantly more robust across server restarts, stuck queue/search states, and occasional request/order misses.
+# ----------------------------------------------
+
+
+# ----------------------------------------------
 ## CURRENT CODE STATUS
 - `src/psai/app/main.py`
     - Has `pokeEnvPlayerInfo` player subclass with inline account/format config in its constructor.
+    - Constructor now enables `start_timer_on_battle_start`.
+    - `choose_move(...)` now includes pending-order timeout fallback and normalized battle-tag handling.
     - Ladder connection runner and network guards are imported from `src/psai/app/connections.py`.
     - Has 2 battle runners:
         - `run_battle(...)` = product/manual pipeline (state -> chooser -> human confirm -> send order)
         - `run_training_battle(..., source="heuristic"|"model")` = auto ladder collection for both phases (model bonus optional based on source)
     - Training collection loop and JSONL logging are unified in `run_training_battle(...)`.
+    - Active-battle loop includes timer enforcement and retry on stalled identical request signatures.
     - `main()` currently runs the full training orchestrator (`run_training_cycle(...)`) with:
         - `bootstrap_decisions=20_000`
         - `model_cycle_decisions=10_000`
@@ -175,7 +205,12 @@ So our "pipeline" is as such:
       and prints `Training status: ...`.
 
 - `src/psai/app/connections.py`
-    - Owns `AsyncConnectionRunner` and network/recovery helpers (`_resolve_runner_state`, reconnect/requeue, and finished-battle cleanup).
+    - Owns `AsyncConnectionRunner` and network/recovery helpers (`_resolve_runner_state`, reconnect/requeue, finished-battle cleanup).
+    - Requeue helper now handles:
+        - socket/listener health detection,
+        - reconnect + cancel-search + re-search for unhealthy states,
+        - cooldown-based probe behavior for healthy queued states.
+    - Includes safe timer-enforcement helper used by runtime loops.
 
 - `src/psai/training/train.py`
     - `TrainConfig` + `train_policy_value(...)` handle optimization/checkpointing.
@@ -186,6 +221,7 @@ So our "pipeline" is as such:
         3. model-play data collection,
         4. inline ladder evaluation,
         5. winrate gate stop/continue logic.
+    - Eval stage now mirrors runtime recovery behavior (timer enforcement + stalled-request retry + guarded requeue).
     - Saves per-cycle artifacts:
         - checkpoints: `training/artifacts/checkpoints/`
         - metrics: `training/artifacts/metrics/`
@@ -211,3 +247,4 @@ So our "pipeline" is as such:
 - Running modes in `main.py`:
     - Product/manual usage: uncomment `run_battle(...)`.
     - Full training loop usage: keep `run_training_cycle(...)` call uncommented.
+# ----------------------------------------------
