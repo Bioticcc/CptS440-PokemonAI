@@ -473,8 +473,10 @@ def run_training_cycle(
             mechanics=mechanics,
             model=model_bonus,
             eval_games=config.eval_games,
+            eval_threshold=config.eval_min_win_rate,
             verbose=config.verbose,
             eval_print_every_games=config.eval_print_every_games,
+            checkpoint_path=str(checkpoint_path),
         )
 
         # If our eval winrate was above 0.50, gate becomes True and we save model then move onto thte next cycle

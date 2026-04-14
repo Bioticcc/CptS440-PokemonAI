@@ -130,6 +130,7 @@ def _safe_requeue_ladder_search(
     *,
     phase_label: str,
     verbose: bool = False,
+    force: bool = False,
 ) -> bool:
     ps_client = getattr(player, "ps_client", None)
     search_ladder_game = getattr(ps_client, "search_ladder_game", None)
@@ -150,7 +151,7 @@ def _safe_requeue_ladder_search(
     connection_healthy = not listener_done and not websocket_closed
     now = time.time()
     healthy_probe_interval_seconds = 120.0
-    if connection_healthy:
+    if connection_healthy and not force:
         last_healthy_probe_at = float(getattr(player, "_healthy_requeue_probe_at", 0.0) or 0.0)
         if now - last_healthy_probe_at < healthy_probe_interval_seconds:
             if verbose:
@@ -165,6 +166,8 @@ def _safe_requeue_ladder_search(
         except Exception:
             pass
     else:
+        if force and verbose:
+            print(f"[{phase_label}] forcing ladder recovery after prolonged idle")
         _safe_restart_showdown_listener(player, phase_label=phase_label, verbose=verbose)
 
     battle_format = str(getattr(player, "format", "") or getattr(player, "_configured_battle_format", "gen1randombattle"))
@@ -193,7 +196,7 @@ def _safe_requeue_ladder_search(
         future.result(timeout=5.0)
 
     try:
-        _attempt_requeue(cancel_first=not connection_healthy)
+        _attempt_requeue(cancel_first=force or (not connection_healthy))
         if verbose:
             if connection_healthy:
                 print(

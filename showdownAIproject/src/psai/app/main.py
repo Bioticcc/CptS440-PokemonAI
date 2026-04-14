@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+import json
 from pathlib import Path
 import time
 from typing import Any
@@ -29,8 +31,14 @@ from psai.app.connections import (
 from psai.decision.chooser import ModelBonusFn, MoveSuggestion, choose_actions
 from psai.domain.state import State, parse_battle_to_state
 from psai.mechanics.api import MechanicsAPI
-from psai.training.dataset import make_log_record, write_log_record
-from psai.training.train import TrainingLoopConfig, run_training_cycle
+from psai.training.dataset import make_log_record, read_log_records, write_log_record
+from psai.training.model import PolicyValueMLP
+from psai.training.train import (
+    TrainingLoopConfig,
+    build_model_bonus_fn,
+    load_checkpoint,
+    run_training_cycle,
+)
 
 # ========================================
 # Guard Code for Abnormal Shoddown Requests (Like hyperbeam recharge)
@@ -687,6 +695,7 @@ def run_training_battle(
     last_prompted_request: dict[str, tuple[Any, ...]] = {}
     last_prompted_at: dict[str, float] = {}
     retry_same_request_after_seconds = 15.0
+    idle_requeue_attempts = 0
 
     while True:
         runner = _resolve_runner_state(
@@ -697,6 +706,7 @@ def run_training_battle(
         )
         if runner is None:
             runner_started_at = None
+            idle_requeue_attempts = 0
 
         battles = dict(getattr(player, "battles", {}) or {})
 
@@ -736,6 +746,8 @@ def run_training_battle(
             _safe_cleanup_finished_battle(player, battle_tag_str, phase_label=phase_label, verbose=verbose)
 
         active_battles = [battle for battle in battles.values() if not getattr(battle, "finished", False)]
+        if active_battles:
+            idle_requeue_attempts = 0
         can_launch_more = decisions_collected < resolved_budget and (
             n_games is None or battles_launched < n_games
         )
@@ -751,16 +763,28 @@ def run_training_battle(
             started_at = runner_started_at or time.time()
             idle_seconds = time.time() - started_at
             if idle_seconds >= 45.0:
+                idle_requeue_attempts += 1
+                force_recovery = idle_requeue_attempts >= 4
                 if verbose:
                     print(
                         f"[{phase_label}] idle_without_battle for {idle_seconds:.1f}s; "
                         f"attempting ladder requeue"
                     )
-                _safe_requeue_ladder_search(player, phase_label=phase_label, verbose=verbose)
+                    if force_recovery:
+                        print(
+                            f"[{phase_label}] prolonged idle detected "
+                            f"(attempt={idle_requeue_attempts}); forcing recovery"
+                        )
+                _safe_requeue_ladder_search(
+                    player,
+                    phase_label=phase_label,
+                    verbose=verbose,
+                    force=force_recovery,
+                )
                 runner_started_at = time.time()
 
         for battle in active_battles:
-            battle_tag = str(getattr(battle, "battle_tag", id(battle)))
+            battle_tag = str(getattr(battle, "battle_tag", id(battle)) or id(battle))
             _safe_ensure_battle_timer_on(player, battle_tag, phase_label=phase_label, verbose=verbose)
             request_signature = _battle_request_signature(battle)
             now = time.time()
@@ -895,14 +919,70 @@ def run_training_battle(
     }
 
 
+def _checkpoint_creation_tag(checkpoint_path: Path) -> str:
+    try:
+        created_at = datetime.fromtimestamp(checkpoint_path.stat().st_mtime)
+    except Exception:
+        created_at = datetime.now()
+    return created_at.strftime("%Y%m%d")
+
+
+def _build_model_progress_payload(
+    *,
+    model_name: str,
+    evaluation: dict[str, Any],
+    eval_threshold: float,
+    checkpoint_path: str | None = None,
+) -> dict[str, Any]:
+    wins = int(evaluation.get("wins", 0))
+    losses = int(evaluation.get("losses", 0))
+    ties = int(evaluation.get("ties", 0))
+    win_rate = float(evaluation.get("win_rate", 0.0))
+    threshold = float(eval_threshold)
+    gate_result = "Passed" if win_rate >= threshold else "Failed"
+
+    payload: dict[str, Any] = {
+        "modelname": model_name,
+        "models_evaluation_stats": {
+            "Wins": wins,
+            "Loss": losses,
+            "Ties": ties,
+            "WR%": round(win_rate * 100.0, 2),
+            "Eval Threshold": round(threshold * 100.0, 2),
+            "Passed/Failed": gate_result,
+        },
+    }
+    if checkpoint_path:
+        payload["checkpoint_path"] = str(checkpoint_path)
+    return payload
+
+
+def _write_model_progress(
+    path: str | Path,
+    payload: dict[str, Any],
+    *,
+    verbose: bool = True,
+) -> None:
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+    if verbose:
+        print(f"[eval] wrote model progress -> {output_path}")
+
+
 def run_evaluation_games(
     player: Any,
     *,
     mechanics: MechanicsAPI,
     model: ModelBonusFn | None = None,
     eval_games: int = 100,
+    eval_threshold: float = 0.50,
     verbose: bool = True,
     eval_print_every_games: int = 10,
+    model_name: str | None = None,
+    model_progress_path: str | Path = "training/artifacts/model_progress.json",
+    checkpoint_path: str | None = None,
 ) -> dict[str, Any]:
     # Alright, this is where we run evaluation for the model. Frankly, it should be its own function,
     # I just wanted to have everything in one place and didnt realize until it was too late just how long this section would be.
@@ -940,6 +1020,7 @@ def run_evaluation_games(
     last_prompted_request: dict[str, tuple[Any, ...]] = {}
     last_prompted_at: dict[str, float] = {}
     retry_same_request_after_seconds = 15.0
+    idle_requeue_attempts = 0
 
     while True:
         runner = _resolve_runner_state(
@@ -950,6 +1031,7 @@ def run_evaluation_games(
         )
         if runner is None:
             runner_started_at = None
+            idle_requeue_attempts = 0
 
         battles = dict(getattr(player, "battles", {}) or {})
         for battle_tag, battle in battles.items():
@@ -984,6 +1066,8 @@ def run_evaluation_games(
                 )
 
         active_battles = [battle for battle in battles.values() if not getattr(battle, "finished", False)]
+        if active_battles:
+            idle_requeue_attempts = 0
         if runner is None and not active_battles and games_launched < eval_games:
             runner = AsyncConnectionRunner(player, 1).start()
             runner_started_at = time.time()
@@ -993,20 +1077,28 @@ def run_evaluation_games(
             started_at = runner_started_at or time.time()
             idle_seconds = time.time() - started_at
             if idle_seconds >= 45.0:
+                idle_requeue_attempts += 1
+                force_recovery = idle_requeue_attempts >= 4
                 if verbose:
                     print(
                         f"[eval] idle_without_battle for {idle_seconds:.1f}s; "
                         f"attempting ladder requeue"
                     )
+                    if force_recovery:
+                        print(
+                            f"[eval] prolonged idle detected "
+                            f"(attempt={idle_requeue_attempts}); forcing recovery"
+                        )
                 _safe_requeue_ladder_search(
                     player,
                     phase_label="eval",
                     verbose=verbose,
+                    force=force_recovery,
                 )
                 runner_started_at = time.time()
 
         for battle in active_battles:
-            battle_tag = str(getattr(battle, "battle_tag", id(battle)))
+            battle_tag = str(getattr(battle, "battle_tag", id(battle)) or id(battle))
             _safe_ensure_battle_timer_on(
                 player,
                 battle_tag,
@@ -1082,7 +1174,100 @@ def run_evaluation_games(
             f"losses={evaluation['losses']} ties={evaluation['ties']} "
             f"win_rate={evaluation['win_rate']:.3f}"
         )
+    if model_name is not None:
+        resolved_model_name = str(model_name)
+    elif checkpoint_path:
+        checkpoint_for_name = Path(str(checkpoint_path))
+        if not checkpoint_for_name.is_absolute():
+            checkpoint_for_name = Path.cwd() / checkpoint_for_name
+        resolved_model_name = f"PokeLearn_{_checkpoint_creation_tag(checkpoint_for_name)}"
+    else:
+        resolved_model_name = "PokeLearn_unknown"
+    gate_passed = bool(evaluation["win_rate"] >= float(eval_threshold))
+    progress_payload = _build_model_progress_payload(
+        model_name=resolved_model_name,
+        evaluation=evaluation,
+        eval_threshold=float(eval_threshold),
+        checkpoint_path=checkpoint_path,
+    )
+    _write_model_progress(model_progress_path, progress_payload, verbose=verbose)
+    evaluation["modelname"] = resolved_model_name
+    evaluation["eval_threshold"] = float(eval_threshold)
+    evaluation["gate_passed"] = gate_passed
     return evaluation
+
+
+def run_eval_from_best_checkpoint(
+    player: Any,
+    *,
+    mechanics: MechanicsAPI,
+    log_path: str | Path = "training/battle_logs.jsonl",
+    artifact_dir: str | Path = "training/artifacts",
+    eval_games: int = 100,
+    eval_threshold: float = 0.50,
+    model_bonus_weight: float = 120.0,
+    model_hidden_sizes: tuple[int, ...] = (128, 64),
+    verbose: bool = True,
+    eval_print_every_games: int = 10,
+) -> dict[str, Any]:
+    artifact_root = Path(artifact_dir)
+    best_pointer_path = artifact_root / "best_model.json"
+
+    checkpoint_path: Path | None = None
+    if best_pointer_path.exists():
+        try:
+            best_payload = dict(json.loads(best_pointer_path.read_text(encoding="utf-8")))
+            checkpoint_value = str(best_payload.get("checkpoint_path", "")).strip()
+            if checkpoint_value:
+                checkpoint_path = Path(checkpoint_value)
+        except Exception:
+            checkpoint_path = None
+
+    if checkpoint_path is None:
+        checkpoint_candidates = sorted((artifact_root / "checkpoints").glob("policy_value_cycle_*.pt"))
+        if checkpoint_candidates:
+            checkpoint_path = checkpoint_candidates[-1]
+
+    if checkpoint_path is None:
+        raise FileNotFoundError(
+            "No checkpoint found. Expected best_model.json or a file under training/artifacts/checkpoints."
+        )
+
+    if not checkpoint_path.is_absolute():
+        checkpoint_path = Path.cwd() / checkpoint_path
+    checkpoint_path = checkpoint_path.resolve()
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint does not exist: {checkpoint_path}")
+
+    records = read_log_records(log_path)
+    if not records:
+        raise ValueError("No training records found; cannot infer model input dimensions for evaluation.")
+
+    model = PolicyValueMLP(
+        input_dim=len(records[0].state_features),
+        hidden_sizes=model_hidden_sizes,
+        action_dim=4,
+    )
+    load_checkpoint(checkpoint_path, model)
+    model_bonus = build_model_bonus_fn(model, weight=model_bonus_weight)
+    resolved_model_name = f"PokeLearn_{_checkpoint_creation_tag(checkpoint_path)}"
+
+    if verbose:
+        print(f"[eval] loaded checkpoint={checkpoint_path}")
+        print(f"[eval] modelname={resolved_model_name}")
+
+    return run_evaluation_games(
+        player,
+        mechanics=mechanics,
+        model=model_bonus,
+        eval_games=eval_games,
+        eval_threshold=eval_threshold,
+        verbose=verbose,
+        eval_print_every_games=eval_print_every_games,
+        model_name=resolved_model_name,
+        model_progress_path=artifact_root / "model_progress.json",
+        checkpoint_path=str(checkpoint_path),
+    )
 
 # ========================================
 # Application Entrypoint
@@ -1110,21 +1295,39 @@ def main() -> int:
     # 5. After the cycle completes, we run eval to determine if the winrate is above the accenptable amount.
     # 6. If the eval fails, stop the loop and change training config in train.py.
     
-    training_report = run_training_cycle(
-        TrainingLoopConfig(
-            log_path="training/battle_logs.jsonl",
-            artifact_dir="training/artifacts",
-            bootstrap_decisions=20_000, # heuristic
-            model_cycle_decisions=10_000,
-            eval_games=100,
-            eval_min_win_rate=0.50,
-            max_cycles=1,
-            collection_n_games=None,
-        ),
+    # training_report = run_training_cycle(
+    #     TrainingLoopConfig(
+    #         log_path="training/battle_logs.jsonl",
+    #         artifact_dir="training/artifacts",
+    #         heuristic_decisions=20_000, # heuristic
+    #         model_cycle_decisions=10_000,
+    #         eval_games=100,
+    #         eval_min_win_rate=0.50,
+    #         max_cycles=1,
+    #         collection_n_games=None,
+    #     ),
+    #     player,
+    #     mechanics,
+    # )
+    # print(f"Training status: {training_report['status']}")
+
+
+    # RUN THIS IF TRAINING CYCLE GOT CUT OFF LAST TIME.
+    evaluation = run_eval_from_best_checkpoint(
         player,
-        mechanics,
+        mechanics=mechanics,
+        log_path="training/battle_logs.jsonl",
+        artifact_dir="training/artifacts",
+        eval_games=100,
+        eval_threshold=0.50,
+        verbose=True,
+        eval_print_every_games=10,
     )
-    print(f"Training status: {training_report['status']}")
+    print(
+        f"Eval result: wins={evaluation['wins']} losses={evaluation['losses']} "
+        f"ties={evaluation['ties']} win_rate={evaluation['win_rate']:.3f} "
+        f"gate={'pass' if evaluation['gate_passed'] else 'fail'}"
+    )
 
 
     return 0
