@@ -14,7 +14,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 import json
 from pathlib import Path
-import time
 from typing import Any, Sequence
 
 try:
@@ -33,14 +32,7 @@ else:
 from psai.training.dataset import BattleLogRecord, records_to_numpy
 from psai.training.model import PolicyValueMLP
 from psai.decision.chooser import ModelBonusFn
-from psai.app.connections import (
-    AsyncConnectionRunner,
-    _resolve_runner_state,
-    _safe_cleanup_finished_battle,
-    _safe_ensure_battle_timer_on,
-    _safe_requeue_ladder_search,
-)
-from psai.domain.state import LegalAction, State, parse_battle_to_state
+from psai.domain.state import LegalAction, State
 from psai.mechanics.api import MechanicsAPI
 from psai.training.dataset import encode_state, read_log_records
 
@@ -69,7 +61,7 @@ class TrainConfig:
 class TrainingLoopConfig:
     log_path: str = "training/battle_logs.jsonl"
     artifact_dir: str = "training/artifacts"
-    bootstrap_decisions: int = 20_000
+    heuristic_decisions: int = 20_000
     heuristic_refresh_decisions: int = 0
     model_cycle_decisions: int = 10_000
     eval_games: int = 100
@@ -346,27 +338,27 @@ def run_training_cycle(
     # causing the errors and network problems, but I think its best to leave this in 
     # in case we want more heuristics later.
     records = read_log_records(log_path) # gets the records
-    bootstrap_result: dict[str, Any] | None = None
+    heuristic_result: dict[str, Any] | None = None
     if config.verbose: # prints for console logging purposes
         print(
             f"[loop] start log_path={log_path} artifact_dir={artifact_dir} "
             f"existing_records={len(records)} max_cycles={config.max_cycles}"
         )
     heuristic_records = _count_heuristic_records(records) # counts how many heuristics we have
-    bootstrap_target = max(0, int(config.bootstrap_decisions)) # how many heursitic decisions we want before model
-    bootstrap_remaining = max(0, bootstrap_target - heuristic_records) # how many more heuristics we need before model
-    if bootstrap_remaining > 0: # if we need more,
+    heuristic_target = max(0, int(config.heuristic_decisions)) # how many heursitic decisions we want before model
+    heuristic_remaining = max(0, heuristic_target - heuristic_records) # how many more heuristics we need before model
+    if heuristic_remaining > 0: # if we need more,
         if config.verbose: # print
             print(
-                f"[loop] bootstrap heuristic resume "
-                f"existing={heuristic_records}/{bootstrap_target} "
-                f"remaining={bootstrap_remaining}"
+                f"[loop] heuristic resume "
+                f"existing={heuristic_records}/{heuristic_target} "
+                f"remaining={heuristic_remaining}"
             ) # and run more heuristics loops until we get to the desired number.
-        bootstrap_result = app_main.run_training_battle(
+        heuristic_result = app_main.run_training_battle(
             player,
             mechanics=mechanics,
             source="heuristic",
-            decision_budget=bootstrap_remaining,
+            decision_budget=heuristic_remaining,
             log_path=log_path,
             cycle_id=0,
             n_games=config.collection_n_games,
@@ -379,14 +371,14 @@ def run_training_cycle(
         heuristic_records = _count_heuristic_records(records)
         if config.verbose:
             print(
-                f"[loop] bootstrap complete heuristic={heuristic_records}/{bootstrap_target} "
+                f"[loop] heuristic complete count={heuristic_records}/{heuristic_target} "
                 f"records={len(records)}"
             )
     # End of resume related stuff. Onto the hard part!
 
 
     if not records: # guard for if records are empty. Means we need to do heuristics first!
-        raise ValueError("No training records available after bootstrap stage.")
+        raise ValueError("No training records available after heuristic stage.")
 
     best_pointer = _load_best_pointer(best_pointer_path) or {} # json record of the best model so far
     best_checkpoint = best_pointer.get("checkpoint_path") # path of the best model checkpoint
@@ -473,184 +465,19 @@ def run_training_cycle(
         
 
 
-        # Alright, this is where we run evaluation for the model. Frankly, it should be its own function,
-        # I just wanted to have everything in one place and didnt realize until it was too late just how long this section would be.
-        # In the future I will move it to its own function, but for now its here.
+        # Evaluation loop now lives in app/main.py run_evaluation_games(...)
+        # It runs ladder eval games, counts wins/losses/ties, and returns win_rate for gate checks.
 
-        # SO, what is happening here is we are running x games of the ladder, and counting how many wins and losses we get.
-        # We then get a win rate, if it that winrate is below what we expected, it failes the gate and stops the training cycle.
-        # currently max cycles is 1 anyway, but we will increase that later and the gate threshold will probably be lowered. 
-        # Unless by some miracle the model is hitting 50%+ winrate off of the FIRST run, in which case shoot for the stars.
+        evaluation = app_main.run_evaluation_games(
+            player,
+            mechanics=mechanics,
+            model=model_bonus,
+            eval_games=config.eval_games,
+            verbose=config.verbose,
+            eval_print_every_games=config.eval_print_every_games,
+        )
 
-        # Majority of this code is just the various guard code related stuff, and we will probably move it to main. 
-
-        # makes our default evaluate results
-        if config.eval_games <= 0:
-            evaluation = {"games": 0, "wins": 0, "losses": 0, "ties": 0, "win_rate": 0.0}
-        else:
-            if config.verbose:
-                print(f"[loop] evaluation start games={config.eval_games}")
-            reset_fn = getattr(player, "reset_battles", None)
-            if callable(reset_fn):
-                try:
-                    reset_fn()
-                except Exception:
-                    pass
-
-            runner = None
-            runner_started_at: float | None = None
-            games_launched = 0
-            games_finished = 0
-            wins = 0
-            losses = 0
-            ties = 0
-            counted_tags: set[str] = set()
-            last_prompted_request: dict[str, tuple[Any, ...]] = {}
-            last_prompted_at: dict[str, float] = {}
-            retry_same_request_after_seconds = 15.0
-
-            while True:
-                runner = _resolve_runner_state(
-                    runner,
-                    player=player,
-                    phase_label="eval",
-                    verbose=config.verbose,
-                )
-                if runner is None:
-                    runner_started_at = None
-
-                battles = dict(getattr(player, "battles", {}) or {})
-                for battle_tag, battle in battles.items():
-                    battle_tag_str = str(battle_tag)
-                    if not getattr(battle, "finished", False) or battle_tag_str in counted_tags:
-                        continue
-                    won = getattr(battle, "won", None)
-                    if won is True:
-                        wins += 1
-                    elif won is False:
-                        losses += 1
-                    else:
-                        ties += 1
-                    counted_tags.add(battle_tag_str)
-                    games_finished += 1
-                    last_prompted_request.pop(battle_tag_str, None)
-                    last_prompted_at.pop(battle_tag_str, None)
-                    _safe_cleanup_finished_battle(
-                        player,
-                        battle_tag_str,
-                        phase_label="eval",
-                        verbose=False,
-                    )
-                    if (
-                        config.verbose
-                        and config.eval_print_every_games > 0
-                        and games_finished % int(config.eval_print_every_games) == 0
-                    ):
-                        print(
-                            f"[eval] games={games_finished}/{config.eval_games} "
-                            f"wins={wins} losses={losses} ties={ties}"
-                        )
-
-                active_battles = [battle for battle in battles.values() if not getattr(battle, "finished", False)]
-                if runner is None and not active_battles and games_launched < config.eval_games:
-                    runner = AsyncConnectionRunner(player, 1).start()
-                    runner_started_at = time.time()
-                    games_launched += 1
-
-                if runner is not None and not runner.done and not active_battles:
-                    started_at = runner_started_at or time.time()
-                    idle_seconds = time.time() - started_at
-                    if idle_seconds >= 45.0:
-                        if config.verbose:
-                            print(
-                                f"[eval] idle_without_battle for {idle_seconds:.1f}s; "
-                                f"attempting ladder requeue"
-                            )
-                        _safe_requeue_ladder_search(
-                            player,
-                            phase_label="eval",
-                            verbose=config.verbose,
-                        )
-                        runner_started_at = time.time()
-
-                for battle in active_battles:
-                    battle_tag = str(getattr(battle, "battle_tag", id(battle)))
-                    _safe_ensure_battle_timer_on(
-                        player,
-                        battle_tag,
-                        phase_label="eval",
-                        verbose=config.verbose,
-                    )
-                    request_signature = app_main._battle_request_signature(battle)
-                    now = time.time()
-                    if last_prompted_request.get(battle_tag) == request_signature:
-                        last_prompt_time = float(last_prompted_at.get(battle_tag, now))
-                        elapsed = now - last_prompt_time
-                        if elapsed < retry_same_request_after_seconds:
-                            continue
-                        if config.verbose:
-                            print(
-                                f"[eval] request_stalled battle={battle_tag} "
-                                f"waited={elapsed:.1f}s; retrying order"
-                            )
-
-                    try:
-                        state = parse_battle_to_state(battle)
-                    except Exception as exc:
-                        if config.verbose:
-                            print(
-                                f"[eval] parse_state_failed battle={battle_tag} "
-                                f"error={type(exc).__name__}: {exc}. Sending default order."
-                            )
-                        if hasattr(player, "set_pending_order"):
-                            player.set_pending_order(battle_tag, app_main._default_order(player))
-                        last_prompted_request[battle_tag] = request_signature
-                        last_prompted_at[battle_tag] = now
-                        continue
-                    if not app_main._has_actionable_request(state, battle):
-                        continue
-
-                    turn_suggestions = (
-                        app_main.get_turn_suggestions(
-                            state,
-                            mechanics,
-                            top_k=1,
-                            model=model_bonus,
-                        )
-                        if state.legal_actions
-                        else []
-                    )
-                    chosen_order, _chosen_action_id = app_main._choose_order_for_request(
-                        player,
-                        battle,
-                        state,
-                        turn_suggestions,
-                    )
-
-                    if hasattr(player, "set_pending_order"):
-                        player.set_pending_order(battle_tag, chosen_order)
-                    last_prompted_request[battle_tag] = request_signature
-                    last_prompted_at[battle_tag] = now
-
-                if games_finished >= config.eval_games and not active_battles and runner is None:
-                    break
-
-                time.sleep(0.1)
-
-            evaluation = {
-                "games": int(games_finished),
-                "wins": int(wins),
-                "losses": int(losses),
-                "ties": int(ties),
-                "win_rate": float(wins / games_finished) if games_finished > 0 else 0.0,
-            }
-            if config.verbose:
-                print(
-                    f"[eval] complete games={evaluation['games']} wins={evaluation['wins']} "
-                    f"losses={evaluation['losses']} ties={evaluation['ties']} "
-                    f"win_rate={evaluation['win_rate']:.3f}"
-                )
-
+        # If our eval winrate was above 0.50, gate becomes True and we save model then move onto thte next cycle
         gate_passed = evaluation["win_rate"] >= float(config.eval_min_win_rate)
         cycle_report = {
             "cycle_id": cycle_id,
@@ -668,7 +495,8 @@ def run_training_cycle(
                 f"[loop] cycle={cycle_id} gate={'pass' if gate_passed else 'fail'} "
                 f"threshold={config.eval_min_win_rate:.3f} win_rate={evaluation['win_rate']:.3f}"
             )
-
+        
+        # adjusting our best winrate so far
         if gate_passed and evaluation["win_rate"] >= best_win_rate:
             best_win_rate = float(evaluation["win_rate"])
             _write_json(
@@ -680,13 +508,13 @@ def run_training_cycle(
                 },
             )
 
-        if not gate_passed:
+        if not gate_passed: # Dont continue cycle, break!
             status = "below_threshold"
             break
 
     return {
         "status": status,
-        "bootstrap": bootstrap_result,
+        "heuristic": heuristic_result,
         "cycles": cycle_reports,
         "log_path": str(log_path),
         "artifact_dir": str(artifact_dir),

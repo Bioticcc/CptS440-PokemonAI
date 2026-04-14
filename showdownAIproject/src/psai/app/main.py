@@ -894,6 +894,196 @@ def run_training_battle(
         "battles_finished": int(battles_finished),
     }
 
+
+def run_evaluation_games(
+    player: Any,
+    *,
+    mechanics: MechanicsAPI,
+    model: ModelBonusFn | None = None,
+    eval_games: int = 100,
+    verbose: bool = True,
+    eval_print_every_games: int = 10,
+) -> dict[str, Any]:
+    # Alright, this is where we run evaluation for the model. Frankly, it should be its own function,
+    # I just wanted to have everything in one place and didnt realize until it was too late just how long this section would be.
+    # 
+    # Nows its the new function!
+
+    # SO, what is happening here is we are running x games of the ladder, and counting how many wins and losses we get.
+    # We then get a win rate, if it that winrate is below what we expected, it failes the gate and stops the training cycle.
+    # currently max cycles is 1 anyway, but we will increase that later and the gate threshold will probably be lowered.
+    # Unless by some miracle the model is hitting 50%+ winrate off of the FIRST run, in which case shoot for the stars.
+
+    # Majority of this code is just the various guard code related stuff, now moved to main for organization.
+
+    # makes our default evaluate results
+    if eval_games <= 0:
+        return {"games": 0, "wins": 0, "losses": 0, "ties": 0, "win_rate": 0.0}
+
+    if verbose:
+        print(f"[loop] evaluation start games={eval_games}")
+    reset_fn = getattr(player, "reset_battles", None)
+    if callable(reset_fn):
+        try:
+            reset_fn()
+        except Exception:
+            pass
+
+    runner = None
+    runner_started_at: float | None = None
+    games_launched = 0
+    games_finished = 0
+    wins = 0
+    losses = 0
+    ties = 0
+    counted_tags: set[str] = set()
+    last_prompted_request: dict[str, tuple[Any, ...]] = {}
+    last_prompted_at: dict[str, float] = {}
+    retry_same_request_after_seconds = 15.0
+
+    while True:
+        runner = _resolve_runner_state(
+            runner,
+            player=player,
+            phase_label="eval",
+            verbose=verbose,
+        )
+        if runner is None:
+            runner_started_at = None
+
+        battles = dict(getattr(player, "battles", {}) or {})
+        for battle_tag, battle in battles.items():
+            battle_tag_str = str(battle_tag)
+            if not getattr(battle, "finished", False) or battle_tag_str in counted_tags:
+                continue
+            won = getattr(battle, "won", None)
+            if won is True:
+                wins += 1
+            elif won is False:
+                losses += 1
+            else:
+                ties += 1
+            counted_tags.add(battle_tag_str)
+            games_finished += 1
+            last_prompted_request.pop(battle_tag_str, None)
+            last_prompted_at.pop(battle_tag_str, None)
+            _safe_cleanup_finished_battle(
+                player,
+                battle_tag_str,
+                phase_label="eval",
+                verbose=False,
+            )
+            if (
+                verbose
+                and eval_print_every_games > 0
+                and games_finished % int(eval_print_every_games) == 0
+            ):
+                print(
+                    f"[eval] games={games_finished}/{eval_games} "
+                    f"wins={wins} losses={losses} ties={ties}"
+                )
+
+        active_battles = [battle for battle in battles.values() if not getattr(battle, "finished", False)]
+        if runner is None and not active_battles and games_launched < eval_games:
+            runner = AsyncConnectionRunner(player, 1).start()
+            runner_started_at = time.time()
+            games_launched += 1
+
+        if runner is not None and not runner.done and not active_battles:
+            started_at = runner_started_at or time.time()
+            idle_seconds = time.time() - started_at
+            if idle_seconds >= 45.0:
+                if verbose:
+                    print(
+                        f"[eval] idle_without_battle for {idle_seconds:.1f}s; "
+                        f"attempting ladder requeue"
+                    )
+                _safe_requeue_ladder_search(
+                    player,
+                    phase_label="eval",
+                    verbose=verbose,
+                )
+                runner_started_at = time.time()
+
+        for battle in active_battles:
+            battle_tag = str(getattr(battle, "battle_tag", id(battle)))
+            _safe_ensure_battle_timer_on(
+                player,
+                battle_tag,
+                phase_label="eval",
+                verbose=verbose,
+            )
+            request_signature = _battle_request_signature(battle)
+            now = time.time()
+            if last_prompted_request.get(battle_tag) == request_signature:
+                last_prompt_time = float(last_prompted_at.get(battle_tag, now))
+                elapsed = now - last_prompt_time
+                if elapsed < retry_same_request_after_seconds:
+                    continue
+                if verbose:
+                    print(
+                        f"[eval] request_stalled battle={battle_tag} "
+                        f"waited={elapsed:.1f}s; retrying order"
+                    )
+
+            try:
+                state = parse_battle_to_state(battle)
+            except Exception as exc:
+                if verbose:
+                    print(
+                        f"[eval] parse_state_failed battle={battle_tag} "
+                        f"error={type(exc).__name__}: {exc}. Sending default order."
+                    )
+                if hasattr(player, "set_pending_order"):
+                    player.set_pending_order(battle_tag, _default_order(player))
+                last_prompted_request[battle_tag] = request_signature
+                last_prompted_at[battle_tag] = now
+                continue
+            if not _has_actionable_request(state, battle):
+                continue
+
+            turn_suggestions = (
+                get_turn_suggestions(
+                    state,
+                    mechanics,
+                    top_k=1,
+                    model=model,
+                )
+                if state.legal_actions
+                else []
+            )
+            chosen_order, _chosen_action_id = _choose_order_for_request(
+                player,
+                battle,
+                state,
+                turn_suggestions,
+            )
+
+            if hasattr(player, "set_pending_order"):
+                player.set_pending_order(battle_tag, chosen_order)
+            last_prompted_request[battle_tag] = request_signature
+            last_prompted_at[battle_tag] = now
+
+        if games_finished >= eval_games and not active_battles and runner is None:
+            break
+
+        time.sleep(0.1)
+
+    evaluation = {
+        "games": int(games_finished),
+        "wins": int(wins),
+        "losses": int(losses),
+        "ties": int(ties),
+        "win_rate": float(wins / games_finished) if games_finished > 0 else 0.0,
+    }
+    if verbose:
+        print(
+            f"[eval] complete games={evaluation['games']} wins={evaluation['wins']} "
+            f"losses={evaluation['losses']} ties={evaluation['ties']} "
+            f"win_rate={evaluation['win_rate']:.3f}"
+        )
+    return evaluation
+
 # ========================================
 # Application Entrypoint
 # ========================================
@@ -924,7 +1114,7 @@ def main() -> int:
         TrainingLoopConfig(
             log_path="training/battle_logs.jsonl",
             artifact_dir="training/artifacts",
-            bootstrap_decisions=20_000,
+            bootstrap_decisions=20_000, # heuristic
             model_cycle_decisions=10_000,
             eval_games=100,
             eval_min_win_rate=0.50,

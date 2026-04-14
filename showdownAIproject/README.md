@@ -29,11 +29,11 @@ python3 -m psai.app.main
 # ----------------------------------------------
 # GIT CHANGES:
 ## PUSH
-cd /home/jeezu/CptS440-PokemonAI
+cd filePathTO/CptS440-PokemonAI
 git checkout main
 git status
 git add .
-git commit -m "bleh"
+git commit -m "Seperating eval func from train"
 git push origin main
 git rev-parse --short HEAD
 
@@ -198,7 +198,7 @@ So our "pipeline" is as such:
     - Training collection loop and JSONL logging are unified in `run_training_battle(...)`.
     - Active-battle loop includes timer enforcement and retry on stalled identical request signatures.
     - `main()` currently runs the full training orchestrator (`run_training_cycle(...)`) with:
-        - `bootstrap_decisions=20_000`
+        - `heuristic_decisions=20_000`
         - `model_cycle_decisions=10_000`
         - `eval_games=100`
         - `max_cycles=1`
@@ -214,9 +214,9 @@ So our "pipeline" is as such:
 
 - `src/psai/training/train.py`
     - `TrainConfig` + `train_policy_value(...)` handle optimization/checkpointing.
-    - `TrainingLoopConfig` controls orchestration (`bootstrap_decisions`, optional `heuristic_refresh_decisions`, `model_cycle_decisions`, eval gate, etc.).
+    - `TrainingLoopConfig` controls orchestration (`heuristic_decisions`, optional `heuristic_refresh_decisions`, `model_cycle_decisions`, eval gate, etc.).
     - `run_training_cycle(...)` does:
-        1. resume-aware heuristic bootstrap to target count,
+        1. resume-aware heuristic collection to target count,
         2. model train on accumulated logs,
         3. model-play data collection,
         4. inline ladder evaluation,
