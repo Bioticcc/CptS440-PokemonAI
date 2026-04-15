@@ -33,7 +33,7 @@ cd filePathTO/CptS440-PokemonAI
 git checkout main
 git status
 git add .
-git commit -m "made eval function for when normal eval gets cutoff in training loop + model name logs for results"
+git commit -m "eval continues to infinite loop"
 git push origin main
 git rev-parse --short HEAD
 

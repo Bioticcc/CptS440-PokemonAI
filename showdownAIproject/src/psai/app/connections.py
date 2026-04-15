@@ -149,26 +149,22 @@ def _safe_requeue_ladder_search(
     websocket_close_code = getattr(websocket, "close_code", None) if websocket is not None else None
     websocket_closed = websocket is None or websocket_close_code is not None
     connection_healthy = not listener_done and not websocket_closed
-    now = time.time()
-    healthy_probe_interval_seconds = 120.0
-    if connection_healthy and not force:
-        last_healthy_probe_at = float(getattr(player, "_healthy_requeue_probe_at", 0.0) or 0.0)
-        if now - last_healthy_probe_at < healthy_probe_interval_seconds:
-            if verbose:
-                cooldown_left = healthy_probe_interval_seconds - (now - last_healthy_probe_at)
-                print(
-                    f"[{phase_label}] queue appears healthy; "
-                    f"skipping forced requeue (cooldown {cooldown_left:.0f}s)"
-                )
-            return True
-        try:
-            setattr(player, "_healthy_requeue_probe_at", now)
-        except Exception:
-            pass
-    else:
-        if force and verbose:
-            print(f"[{phase_label}] forcing ladder recovery after prolonged idle")
-        _safe_restart_showdown_listener(player, phase_label=phase_label, verbose=verbose)
+    # Important safety behavior:
+    # never send extra /search probes while the connection appears healthy.
+    # runner.ladder(...) already owns matchmaking; duplicate searches can cause
+    # hidden concurrent battles and server-side "5 games at the same time" limits.
+    if connection_healthy:
+        if verbose:
+            suffix = " (force requested)" if force else ""
+            print(
+                f"[{phase_label}] queue appears healthy; "
+                f"skipping forced requeue{suffix}"
+            )
+        return True
+
+    if force and verbose:
+        print(f"[{phase_label}] forcing ladder recovery after prolonged idle")
+    _safe_restart_showdown_listener(player, phase_label=phase_label, verbose=verbose)
 
     battle_format = str(getattr(player, "format", "") or getattr(player, "_configured_battle_format", "gen1randombattle"))
     team = getattr(player, "next_team", None)
@@ -196,15 +192,9 @@ def _safe_requeue_ladder_search(
         future.result(timeout=5.0)
 
     try:
-        _attempt_requeue(cancel_first=force or (not connection_healthy))
+        _attempt_requeue(cancel_first=True)
         if verbose:
-            if connection_healthy:
-                print(
-                    f"[{phase_label}] requeue probe sent while healthy "
-                    f"format={battle_format}"
-                )
-            else:
-                print(f"[{phase_label}] requeued ladder search format={battle_format}")
+            print(f"[{phase_label}] requeued ladder search format={battle_format}")
         return True
     except Exception as exc:
         if _is_recoverable_connection_error(exc):

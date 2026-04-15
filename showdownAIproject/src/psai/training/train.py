@@ -476,6 +476,9 @@ def run_training_cycle(
             eval_threshold=config.eval_min_win_rate,
             verbose=config.verbose,
             eval_print_every_games=config.eval_print_every_games,
+            top_k=max(1, int(config.print_top_k)),
+            print_top_k=config.print_top_k,
+            print_turn_suggestions=config.print_turn_suggestions,
             checkpoint_path=str(checkpoint_path),
         )
 

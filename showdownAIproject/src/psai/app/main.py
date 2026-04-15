@@ -980,6 +980,9 @@ def run_evaluation_games(
     eval_threshold: float = 0.50,
     verbose: bool = True,
     eval_print_every_games: int = 10,
+    top_k: int = 3,
+    print_top_k: int | None = None,
+    print_turn_suggestions: bool = True,
     model_name: str | None = None,
     model_progress_path: str | Path = "training/artifacts/model_progress.json",
     checkpoint_path: str | None = None,
@@ -1021,6 +1024,8 @@ def run_evaluation_games(
     last_prompted_at: dict[str, float] = {}
     retry_same_request_after_seconds = 15.0
     idle_requeue_attempts = 0
+    resolved_top_k = max(1, int(top_k))
+    resolved_print_top_k = int(print_top_k if print_top_k is not None else resolved_top_k)
 
     while True:
         runner = _resolve_runner_state(
@@ -1047,6 +1052,11 @@ def run_evaluation_games(
                 ties += 1
             counted_tags.add(battle_tag_str)
             games_finished += 1
+            battle_result = "tie"
+            if won is True:
+                battle_result = "win"
+            elif won is False:
+                battle_result = "loss"
             last_prompted_request.pop(battle_tag_str, None)
             last_prompted_at.pop(battle_tag_str, None)
             _safe_cleanup_finished_battle(
@@ -1055,6 +1065,11 @@ def run_evaluation_games(
                 phase_label="eval",
                 verbose=False,
             )
+            if verbose:
+                print(
+                    f"[eval] battle_finished tag={battle_tag_str} result={battle_result} "
+                    f"games={games_finished}/{eval_games}"
+                )
             if (
                 verbose
                 and eval_print_every_games > 0
@@ -1072,6 +1087,8 @@ def run_evaluation_games(
             runner = AsyncConnectionRunner(player, 1).start()
             runner_started_at = time.time()
             games_launched += 1
+            if verbose:
+                print(f"[eval] launched ladder game #{games_launched}/{eval_games}")
 
         if runner is not None and not runner.done and not active_battles:
             started_at = runner_started_at or time.time()
@@ -1138,18 +1155,28 @@ def run_evaluation_games(
                 get_turn_suggestions(
                     state,
                     mechanics,
-                    top_k=1,
+                    top_k=resolved_top_k,
                     model=model,
                 )
                 if state.legal_actions
                 else []
             )
-            chosen_order, _chosen_action_id = _choose_order_for_request(
+            chosen_order, chosen_action_id = _choose_order_for_request(
                 player,
                 battle,
                 state,
                 turn_suggestions,
             )
+
+            if verbose and print_turn_suggestions:
+                _print_turn_suggestions(
+                    "eval",
+                    battle_tag,
+                    state,
+                    turn_suggestions,
+                    chosen_action_id,
+                    max_suggestions=resolved_print_top_k,
+                )
 
             if hasattr(player, "set_pending_order"):
                 player.set_pending_order(battle_tag, chosen_order)
@@ -1209,6 +1236,9 @@ def run_eval_from_best_checkpoint(
     model_hidden_sizes: tuple[int, ...] = (128, 64),
     verbose: bool = True,
     eval_print_every_games: int = 10,
+    top_k: int = 3,
+    print_top_k: int | None = None,
+    print_turn_suggestions: bool = True,
 ) -> dict[str, Any]:
     artifact_root = Path(artifact_dir)
     best_pointer_path = artifact_root / "best_model.json"
@@ -1264,6 +1294,9 @@ def run_eval_from_best_checkpoint(
         eval_threshold=eval_threshold,
         verbose=verbose,
         eval_print_every_games=eval_print_every_games,
+        top_k=top_k,
+        print_top_k=print_top_k,
+        print_turn_suggestions=print_turn_suggestions,
         model_name=resolved_model_name,
         model_progress_path=artifact_root / "model_progress.json",
         checkpoint_path=str(checkpoint_path),
