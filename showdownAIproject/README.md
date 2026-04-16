@@ -33,7 +33,7 @@ cd filePathTO/CptS440-PokemonAI
 git checkout main
 git status
 git add .
-git commit -m "eval continues to infinite loop"
+git commit -m "first model complete, training second."
 git push origin main
 git rev-parse --short HEAD
 

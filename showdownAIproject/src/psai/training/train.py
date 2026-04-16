@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 import json
 from pathlib import Path
 from typing import Any, Sequence
@@ -95,6 +95,7 @@ def save_checkpoint(
     *,
     epoch: int,
     metrics: dict[str, list[float]],
+    train_config: dict[str, Any] | None = None,
 ) -> None:
 
     # Save a model we like
@@ -109,6 +110,7 @@ def save_checkpoint(
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "metrics": metrics,
+            "train_config": dict(train_config) if train_config is not None else None,
         },
         checkpoint_path,
     )
@@ -304,6 +306,7 @@ def train_policy_value(
             optimizer,
             epoch=cfg.epochs,
             metrics=metrics,
+            train_config=asdict(cfg),
         )
 
     # return the number of epochs we ran, the number of input records, and metrics summary.
@@ -432,6 +435,7 @@ def run_training_cycle(
         # Finds the checkpoint path for this cycle, then calls the train_policy_value function!
         checkpoint_path = checkpoints_dir / f"policy_value_cycle_{cycle_id:04d}.pt"
         cycle_train_config = replace(config.train_config, checkpoint_path=str(checkpoint_path))
+        cycle_train_config_payload = asdict(cycle_train_config)
         
         # train policy value! baller!
         train_result = train_policy_value(model, records, config=cycle_train_config)
@@ -465,21 +469,24 @@ def run_training_cycle(
         
 
 
-        # Evaluation loop now lives in app/main.py run_evaluation_games(...)
-        # It runs ladder eval games, counts wins/losses/ties, and returns win_rate for gate checks.
-
+        # Eval uses the same checkpoint-based function for both in-cycle and
+        # standalone usage.
         evaluation = app_main.run_evaluation_games(
             player,
             mechanics=mechanics,
-            model=model_bonus,
+            checkpoint_path=checkpoint_path,
+            log_path=log_path,
+            artifact_dir=artifact_dir,
             eval_games=config.eval_games,
             eval_threshold=config.eval_min_win_rate,
+            model_bonus_weight=config.model_bonus_weight,
+            model_hidden_sizes=config.model_hidden_sizes,
             verbose=config.verbose,
             eval_print_every_games=config.eval_print_every_games,
             top_k=max(1, int(config.print_top_k)),
             print_top_k=config.print_top_k,
             print_turn_suggestions=config.print_turn_suggestions,
-            checkpoint_path=str(checkpoint_path),
+            training_config=cycle_train_config_payload,
         )
 
         # If our eval winrate was above 0.50, gate becomes True and we save model then move onto thte next cycle
@@ -488,6 +495,7 @@ def run_training_cycle(
             "cycle_id": cycle_id,
             "records_used": len(records),
             "checkpoint_path": str(checkpoint_path),
+            "train_config": cycle_train_config_payload,
             "train_result": train_result,
             "model_collection": model_collection,
             "evaluation": evaluation,

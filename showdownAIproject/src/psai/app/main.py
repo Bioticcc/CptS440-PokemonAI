@@ -10,9 +10,11 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict, is_dataclass
 from datetime import datetime
 import json
 from pathlib import Path
+import re
 import time
 from typing import Any
 
@@ -927,12 +929,56 @@ def _checkpoint_creation_tag(checkpoint_path: Path) -> str:
     return created_at.strftime("%Y%m%d")
 
 
+def _normalize_training_config(training_config: Any | None) -> dict[str, Any] | None:
+    if training_config is None:
+        return None
+    if is_dataclass(training_config):
+        return dict(asdict(training_config))
+    if isinstance(training_config, dict):
+        return dict(training_config)
+    return {"value": str(training_config)}
+
+
+def _extract_cycle_id_from_checkpoint(checkpoint_path: Path) -> int | None:
+    match = re.fullmatch(r"policy_value_cycle_(\d+)\.pt", checkpoint_path.name)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _load_training_config_for_checkpoint(
+    artifact_root: Path,
+    checkpoint_path: Path,
+) -> dict[str, Any] | None:
+    cycle_id = _extract_cycle_id_from_checkpoint(checkpoint_path)
+    if cycle_id is None:
+        return None
+
+    cycle_metrics_path = artifact_root / "metrics" / f"cycle_{cycle_id:04d}.json"
+    if not cycle_metrics_path.exists():
+        return None
+
+    try:
+        cycle_payload = json.loads(cycle_metrics_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    training_config = cycle_payload.get("train_config")
+    if isinstance(training_config, dict):
+        return dict(training_config)
+    return None
+
+
 def _build_model_progress_payload(
     *,
     model_name: str,
     evaluation: dict[str, Any],
     eval_threshold: float,
     checkpoint_path: str | None = None,
+    training_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     wins = int(evaluation.get("wins", 0))
     losses = int(evaluation.get("losses", 0))
@@ -954,6 +1000,8 @@ def _build_model_progress_payload(
     }
     if checkpoint_path:
         payload["checkpoint_path"] = str(checkpoint_path)
+    if training_config is not None:
+        payload["training_config"] = dict(training_config)
     return payload
 
 
@@ -975,17 +1023,20 @@ def run_evaluation_games(
     player: Any,
     *,
     mechanics: MechanicsAPI,
-    model: ModelBonusFn | None = None,
+    checkpoint_path: str | Path,
+    log_path: str | Path = "training/battle_logs.jsonl",
+    artifact_dir: str | Path = "training/artifacts",
     eval_games: int = 100,
     eval_threshold: float = 0.50,
+    model_bonus_weight: float = 120.0,
+    model_hidden_sizes: tuple[int, ...] = (128, 64),
     verbose: bool = True,
     eval_print_every_games: int = 10,
     top_k: int = 3,
     print_top_k: int | None = None,
     print_turn_suggestions: bool = True,
-    model_name: str | None = None,
-    model_progress_path: str | Path = "training/artifacts/model_progress.json",
-    checkpoint_path: str | None = None,
+    model_progress_path: str | Path | None = None,
+    training_config: Any | None = None,
 ) -> dict[str, Any]:
     # Alright, this is where we run evaluation for the model. Frankly, it should be its own function,
     # I just wanted to have everything in one place and didnt realize until it was too late just how long this section would be.
@@ -999,12 +1050,51 @@ def run_evaluation_games(
 
     # Majority of this code is just the various guard code related stuff, now moved to main for organization.
 
+    artifact_root = Path(artifact_dir)
+    resolved_checkpoint_path = Path(checkpoint_path)
+    if not resolved_checkpoint_path.is_absolute():
+        resolved_checkpoint_path = Path.cwd() / resolved_checkpoint_path
+    resolved_checkpoint_path = resolved_checkpoint_path.resolve()
+    if not resolved_checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint does not exist: {resolved_checkpoint_path}")
+
+    records = read_log_records(log_path)
+    if not records:
+        raise ValueError("No training records found; cannot infer model input dimensions for evaluation.")
+
+    model = PolicyValueMLP(
+        input_dim=len(records[0].state_features),
+        hidden_sizes=model_hidden_sizes,
+        action_dim=4,
+    )
+    checkpoint_payload = load_checkpoint(resolved_checkpoint_path, model)
+    model_bonus = build_model_bonus_fn(model, weight=model_bonus_weight)
+    resolved_model_name = f"PokeLearn_{_checkpoint_creation_tag(resolved_checkpoint_path)}"
+
+    resolved_training_config = _normalize_training_config(training_config)
+    if resolved_training_config is None:
+        checkpoint_training_config = checkpoint_payload.get("train_config")
+        if isinstance(checkpoint_training_config, dict):
+            resolved_training_config = dict(checkpoint_training_config)
+    if resolved_training_config is None:
+        resolved_training_config = _load_training_config_for_checkpoint(
+            artifact_root,
+            resolved_checkpoint_path,
+        )
+
+    resolved_model_progress_path = (
+        Path(model_progress_path) if model_progress_path is not None else artifact_root / "model_progress.json"
+    )
+
+    if verbose:
+        print(f"[eval] loaded checkpoint={resolved_checkpoint_path}")
+        print(f"[eval] modelname={resolved_model_name}")
+        print(f"[loop] evaluation start games={eval_games}")
+
     # makes our default evaluate results
     if eval_games <= 0:
         return {"games": 0, "wins": 0, "losses": 0, "ties": 0, "win_rate": 0.0}
 
-    if verbose:
-        print(f"[loop] evaluation start games={eval_games}")
     reset_fn = getattr(player, "reset_battles", None)
     if callable(reset_fn):
         try:
@@ -1156,7 +1246,7 @@ def run_evaluation_games(
                     state,
                     mechanics,
                     top_k=resolved_top_k,
-                    model=model,
+                    model=model_bonus,
                 )
                 if state.legal_actions
                 else []
@@ -1201,45 +1291,23 @@ def run_evaluation_games(
             f"losses={evaluation['losses']} ties={evaluation['ties']} "
             f"win_rate={evaluation['win_rate']:.3f}"
         )
-    if model_name is not None:
-        resolved_model_name = str(model_name)
-    elif checkpoint_path:
-        checkpoint_for_name = Path(str(checkpoint_path))
-        if not checkpoint_for_name.is_absolute():
-            checkpoint_for_name = Path.cwd() / checkpoint_for_name
-        resolved_model_name = f"PokeLearn_{_checkpoint_creation_tag(checkpoint_for_name)}"
-    else:
-        resolved_model_name = "PokeLearn_unknown"
+
     gate_passed = bool(evaluation["win_rate"] >= float(eval_threshold))
     progress_payload = _build_model_progress_payload(
         model_name=resolved_model_name,
         evaluation=evaluation,
         eval_threshold=float(eval_threshold),
-        checkpoint_path=checkpoint_path,
+        checkpoint_path=str(resolved_checkpoint_path),
+        training_config=resolved_training_config,
     )
-    _write_model_progress(model_progress_path, progress_payload, verbose=verbose)
+    _write_model_progress(resolved_model_progress_path, progress_payload, verbose=verbose)
     evaluation["modelname"] = resolved_model_name
     evaluation["eval_threshold"] = float(eval_threshold)
     evaluation["gate_passed"] = gate_passed
     return evaluation
 
 
-def run_eval_from_best_checkpoint(
-    player: Any,
-    *,
-    mechanics: MechanicsAPI,
-    log_path: str | Path = "training/battle_logs.jsonl",
-    artifact_dir: str | Path = "training/artifacts",
-    eval_games: int = 100,
-    eval_threshold: float = 0.50,
-    model_bonus_weight: float = 120.0,
-    model_hidden_sizes: tuple[int, ...] = (128, 64),
-    verbose: bool = True,
-    eval_print_every_games: int = 10,
-    top_k: int = 3,
-    print_top_k: int | None = None,
-    print_turn_suggestions: bool = True,
-) -> dict[str, Any]:
+def _resolve_best_checkpoint_path(artifact_dir: str | Path = "training/artifacts") -> Path:
     artifact_root = Path(artifact_dir)
     best_pointer_path = artifact_root / "best_model.json"
 
@@ -1265,42 +1333,7 @@ def run_eval_from_best_checkpoint(
 
     if not checkpoint_path.is_absolute():
         checkpoint_path = Path.cwd() / checkpoint_path
-    checkpoint_path = checkpoint_path.resolve()
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(f"Checkpoint does not exist: {checkpoint_path}")
-
-    records = read_log_records(log_path)
-    if not records:
-        raise ValueError("No training records found; cannot infer model input dimensions for evaluation.")
-
-    model = PolicyValueMLP(
-        input_dim=len(records[0].state_features),
-        hidden_sizes=model_hidden_sizes,
-        action_dim=4,
-    )
-    load_checkpoint(checkpoint_path, model)
-    model_bonus = build_model_bonus_fn(model, weight=model_bonus_weight)
-    resolved_model_name = f"PokeLearn_{_checkpoint_creation_tag(checkpoint_path)}"
-
-    if verbose:
-        print(f"[eval] loaded checkpoint={checkpoint_path}")
-        print(f"[eval] modelname={resolved_model_name}")
-
-    return run_evaluation_games(
-        player,
-        mechanics=mechanics,
-        model=model_bonus,
-        eval_games=eval_games,
-        eval_threshold=eval_threshold,
-        verbose=verbose,
-        eval_print_every_games=eval_print_every_games,
-        top_k=top_k,
-        print_top_k=print_top_k,
-        print_turn_suggestions=print_turn_suggestions,
-        model_name=resolved_model_name,
-        model_progress_path=artifact_root / "model_progress.json",
-        checkpoint_path=str(checkpoint_path),
-    )
+    return checkpoint_path.resolve()
 
 # ========================================
 # Application Entrypoint
@@ -1328,39 +1361,41 @@ def main() -> int:
     # 5. After the cycle completes, we run eval to determine if the winrate is above the accenptable amount.
     # 6. If the eval fails, stop the loop and change training config in train.py.
     
-    # training_report = run_training_cycle(
-    #     TrainingLoopConfig(
-    #         log_path="training/battle_logs.jsonl",
-    #         artifact_dir="training/artifacts",
-    #         heuristic_decisions=20_000, # heuristic
-    #         model_cycle_decisions=10_000,
-    #         eval_games=100,
-    #         eval_min_win_rate=0.50,
-    #         max_cycles=1,
-    #         collection_n_games=None,
-    #     ),
-    #     player,
-    #     mechanics,
-    # )
-    # print(f"Training status: {training_report['status']}")
+    training_report = run_training_cycle(
+        TrainingLoopConfig(
+            log_path="training/battle_logs.jsonl",
+            artifact_dir="training/artifacts",
+            heuristic_decisions=20_000, # heuristic
+            model_cycle_decisions=10_000,
+            eval_games=100,
+            eval_min_win_rate=0.50,
+            max_cycles=1,
+            collection_n_games=None,
+        ),
+        player,
+        mechanics,
+    )
+    print(f"Training status: {training_report['status']}")
 
 
     # RUN THIS IF TRAINING CYCLE GOT CUT OFF LAST TIME.
-    evaluation = run_eval_from_best_checkpoint(
-        player,
-        mechanics=mechanics,
-        log_path="training/battle_logs.jsonl",
-        artifact_dir="training/artifacts",
-        eval_games=100,
-        eval_threshold=0.50,
-        verbose=True,
-        eval_print_every_games=10,
-    )
-    print(
-        f"Eval result: wins={evaluation['wins']} losses={evaluation['losses']} "
-        f"ties={evaluation['ties']} win_rate={evaluation['win_rate']:.3f} "
-        f"gate={'pass' if evaluation['gate_passed'] else 'fail'}"
-    )
+    # checkpoint_path = _resolve_best_checkpoint_path("training/artifacts")
+    # evaluation = run_evaluation_games(
+    #     player,
+    #     mechanics=mechanics,
+    #     checkpoint_path=checkpoint_path,
+    #     log_path="training/battle_logs.jsonl",
+    #     artifact_dir="training/artifacts",
+    #     eval_games=100,
+    #     eval_threshold=0.50,
+    #     verbose=True,
+    #     eval_print_every_games=10,
+    # )
+    # print(
+    #     f"Eval result: wins={evaluation['wins']} losses={evaluation['losses']} "
+    #     f"ties={evaluation['ties']} win_rate={evaluation['win_rate']:.3f} "
+    #     f"gate={'pass' if evaluation['gate_passed'] else 'fail'}"
+    # )
 
 
     return 0
