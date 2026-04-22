@@ -199,6 +199,19 @@ def _count_heuristic_records(records: Sequence[BattleLogRecord]) -> int:
     return total
 
 
+def _next_checkpoint_run_index(checkpoints_dir: Path, cycle_id: int) -> int:
+    prefix = f"policy_value_cycle_{int(cycle_id):04d}_run_"
+    highest_run_index = 0
+    for path in checkpoints_dir.glob(f"{prefix}*.pt"):
+        stem = path.stem
+        if not stem.startswith(prefix):
+            continue
+        suffix = stem[len(prefix) :]
+        if suffix.isdigit():
+            highest_run_index = max(highest_run_index, int(suffix))
+    return highest_run_index + 1
+
+
 
 # ========================================
 # Main Functions
@@ -433,7 +446,8 @@ def run_training_cycle(
             print(f"[loop] training model on records={len(records)}")
 
         # Finds the checkpoint path for this cycle, then calls the train_policy_value function!
-        checkpoint_path = checkpoints_dir / f"policy_value_cycle_{cycle_id:04d}.pt"
+        run_index = _next_checkpoint_run_index(checkpoints_dir, cycle_id)
+        checkpoint_path = checkpoints_dir / f"policy_value_cycle_{cycle_id:04d}_run_{run_index:04d}.pt"
         cycle_train_config = replace(config.train_config, checkpoint_path=str(checkpoint_path))
         cycle_train_config_payload = asdict(cycle_train_config)
         
@@ -509,17 +523,14 @@ def run_training_cycle(
                 f"threshold={config.eval_min_win_rate:.3f} win_rate={evaluation['win_rate']:.3f}"
             )
         
-        # adjusting our best winrate so far
-        if gate_passed and evaluation["win_rate"] >= best_win_rate:
-            best_win_rate = float(evaluation["win_rate"])
-            _write_json(
-                best_pointer_path,
-                {
-                    "cycle_id": cycle_id,
-                    "checkpoint_path": str(checkpoint_path),
-                    "win_rate": best_win_rate,
-                },
-            )
+        # Champion/challenger promotion is handled inside run_evaluation_games so that
+        # both standalone and in-cycle evals apply the same promotion rule.
+        champion_win_rate_after = evaluation.get("champion_win_rate_after")
+        if champion_win_rate_after is not None:
+            try:
+                best_win_rate = float(champion_win_rate_after)
+            except (TypeError, ValueError):
+                pass
 
         if not gate_passed: # Dont continue cycle, break!
             status = "below_threshold"

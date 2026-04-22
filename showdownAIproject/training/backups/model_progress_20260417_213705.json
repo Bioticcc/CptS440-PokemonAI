@@ -1,0 +1,22 @@
+{
+  "checkpoint_path": "/home/kyle/Desktop/Adam/CptS440-PokemonAI/showdownAIproject/training/artifacts/checkpoints/policy_value_cycle_0001.pt",
+  "modelname": "PokeLearn_20260413",
+  "models_evaluation_stats": {
+    "Eval Threshold": 50.0,
+    "Loss": 66,
+    "Passed/Failed": "Failed",
+    "Ties": 0,
+    "WR%": 34.0,
+    "Wins": 34
+  },
+  "training_config": {
+    "batch_size": 32,
+    "checkpoint_path": "/home/kyle/Desktop/Adam/CptS440-PokemonAI/showdownAIproject/training/artifacts/checkpoints/policy_value_cycle_0001.pt",
+    "device": "cpu",
+    "epochs": 5,
+    "learning_rate": 0.001,
+    "value_loss_weight": 1.0,
+    "verbose": true,
+    "weight_decay": 0.0
+  }
+}

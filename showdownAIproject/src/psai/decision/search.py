@@ -14,6 +14,32 @@ from psai.domain.state import LegalAction, State
 from psai.mechanics.api import ActionOutcome, MechanicsAPI
 
 
+
+def _opponent_can_switch(state: State) -> bool:
+    
+    # Guard for wether the opponent is capable of switching, we need this later for prediticin
+    # optimal move from opponent, below.
+    
+    opponent_active_identifier = str(state.opponent_active.identifier or "").strip()
+    opponent_active_species = str(state.opponent_active.species or "").strip().lower()
+
+    for candidate in state.opponent_team:
+        if candidate.fainted or float(candidate.hp_fraction) <= 0.0:
+            continue
+
+        candidate_identifier = str(candidate.identifier or "").strip()
+        if candidate_identifier and opponent_active_identifier:
+            if candidate_identifier == opponent_active_identifier:
+                continue
+            return True
+
+        candidate_species = str(candidate.species or "").strip().lower()
+        if candidate_species and candidate_species != opponent_active_species:
+            return True
+
+    return False
+
+
 def get_opponent_response_adjustment(
     state: State,
     action: LegalAction,
@@ -29,11 +55,46 @@ def get_opponent_response_adjustment(
     # still better. I am betting this will be the main cause of our agent losing to people. 
 
     weights = HeuristicWeights()
-    incoming_ko_penalty = weights.self_ko_penalty * outcome.ko_probability_to_self
-    incoming_damage_penalty = weights.incoming_damage_weight * outcome.expected_damage_to_self
-    tempo_penalty = 0.0 if outcome.move_first else (weights.move_first_bonus * 0.5)
 
-    return -(incoming_ko_penalty + incoming_damage_penalty + tempo_penalty)
+    ko_to_self = max(0.0, min(1.0, float(outcome.ko_probability_to_self)))
+    incoming_damage = max(0.0, min(1.0, float(outcome.expected_damage_to_self)))
+    ko_to_opponent = max(0.0, min(1.0, float(outcome.ko_probability_to_opponent)))
+    outgoing_damage = max(0.0, min(1.0, float(outcome.expected_damage_to_opponent)))
+
+    # Opponent move-response pressure derived strictly from existing mechanics terms.
+    move_penalty = (
+        (weights.self_ko_penalty * ko_to_self)
+        + (weights.incoming_damage_weight * incoming_damage)
+        + (0.0 if outcome.move_first else (weights.move_first_bonus * 0.5))
+    )
+
+    # Approximate probability that opponent prefers staying in and attacking.
+    move_weight = 1.0 + (1.2 * ko_to_self) + (0.8 * incoming_damage)
+    if not outcome.move_first:
+        move_weight += 0.2
+
+    # Approximate probability that opponent switches to avoid our pressure.
+    switch_weight = 0.0
+    if _opponent_can_switch(state):
+        action_threat = (0.7 * ko_to_opponent) + (0.3 * outgoing_damage)
+        switch_weight = max(0.0, min(1.0, action_threat))
+
+    total_weight = move_weight + switch_weight
+    if total_weight <= 0.0:
+        return -move_penalty
+
+    move_probability = move_weight / total_weight
+    switch_probability = switch_weight / total_weight
+
+    switch_penalty_scale = 0.25 if action.is_switch else 1.0
+    switch_penalty = (
+        (weights.ko_now_bonus * ko_to_opponent * 0.65 * switch_penalty_scale)
+        + (weights.damage_weight * outgoing_damage * 0.45 * switch_penalty_scale)
+        + (weights.move_first_bonus * 0.2)
+    )
+
+    expected_penalty = (move_probability * move_penalty) + (switch_probability * switch_penalty)
+    return -expected_penalty
 
 
 @dataclass(slots=True)
@@ -41,7 +102,8 @@ def get_opponent_response_adjustment(
 # Also, if ever need to add more specifics, can just add to the dataclass and access it from there. 
 class SearchConfig:
 
-    depth: int = 1 # Howw deep we search down the tree of possible moves and actions.
+    depth: int = 3 # Howw deep we search down the tree of possible moves and actions.
+    depth_decay: float = 0.55 # diminishing influence for ply>2 continuation approximation.
     top_k: int = 3 # How many of the top moves to keep. (maybe make this universal? we also set in main)
 
 
@@ -82,9 +144,22 @@ def rank_actions(
             response_adjustment_fn = opponent_response_fn or get_opponent_response_adjustment
             depth2_adjustment = float(response_adjustment_fn(state, action, outcome))
             breakdown = dict(breakdown) # get the top terms from our score
-            breakdown["depth2_adjustment"] = depth2_adjustment # Now we add the adjusted score for that state based on the opponents response. 
+            breakdown["depth2_adjustment"] = depth2_adjustment # Now we add the adjusted score for that state based on the opponents response.
 
-            base_score += depth2_adjustment
+            total_depth_adjustment = depth2_adjustment
+            resolved_depth = max(2, int(cfg.depth))
+            resolved_decay = max(0.0, min(1.0, float(cfg.depth_decay)))
+
+            # Continuation approximation: for deeper plies, keep applying a
+            # discounted copy of the opponent-response pressure.
+            # This is not full tree search, but gives depth > 2 meaningful behavior.
+            if resolved_depth > 2 and resolved_decay > 0.0:
+                for ply in range(3, resolved_depth + 1):
+                    ply_adjustment = depth2_adjustment * (resolved_decay ** (ply - 2))
+                    breakdown[f"depth{ply}_adjustment"] = ply_adjustment
+                    total_depth_adjustment += ply_adjustment
+
+            base_score += total_depth_adjustment
 
         scored.append(ScoredAction(action=action, outcome=outcome, score=base_score, breakdown=breakdown))
 

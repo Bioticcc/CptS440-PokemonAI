@@ -10,15 +10,19 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 import json
 from pathlib import Path
 import re
+import select
+import sys
 import time
 from typing import Any
 
 from poke_env import AccountConfiguration, ShowdownServerConfiguration
+from poke_env.battle.abstract_battle import AbstractBattle
 from poke_env.battle.pokemon import Pokemon
 from poke_env.player import Player
 
@@ -36,6 +40,7 @@ from psai.mechanics.api import MechanicsAPI
 from psai.training.dataset import make_log_record, read_log_records, write_log_record
 from psai.training.model import PolicyValueMLP
 from psai.training.train import (
+    TrainConfig,
     TrainingLoopConfig,
     build_model_bonus_fn,
     load_checkpoint,
@@ -47,6 +52,7 @@ from psai.training.train import (
 # ========================================
 
 _ORIGINAL_AVAILABLE_MOVES_FROM_REQUEST = Pokemon.available_moves_from_request
+_ORIGINAL_UPDATE_TEAM_FROM_REQUEST = AbstractBattle._update_team_from_request
 
 
 def _request_move_ids_from_request(request: dict[str, Any] | None) -> tuple[str, ...]:
@@ -137,6 +143,78 @@ def _install_poke_env_move_request_fallback() -> None:
 
 
 _install_poke_env_move_request_fallback()
+
+
+def _install_poke_env_request_team_guard() -> None:
+    current_impl = AbstractBattle._update_team_from_request
+    if getattr(current_impl, "__name__", "") == "_psai_update_team_from_request":
+        return
+
+    def _psai_update_team_from_request(self: Any, side: dict[str, Any], strict_battle_tracking: bool = False) -> None:
+        try:
+            _ORIGINAL_UPDATE_TEAM_FROM_REQUEST(self, side, strict_battle_tracking)
+            return
+        except KeyError:
+            # Server restarts and reconnect races can occasionally produce request payloads
+            # whose side identifiers are not yet present in poke-env's local team map.
+            # Best-effort repair the mapping and retry once instead of wedging the battle loop.
+            pass
+
+        pokemon_payload = side.get("pokemon", []) if isinstance(side, dict) else []
+        repaired = False
+        for pokemon in pokemon_payload:
+            if not isinstance(pokemon, dict):
+                continue
+            ident = str(pokemon.get("ident", "") or "")
+            if not ident:
+                continue
+            details = str(pokemon.get("details", "") or "")
+            try:
+                self.get_pokemon(
+                    ident,
+                    force_self_team=True,
+                    details=details,
+                    request=pokemon,
+                )
+                repaired = True
+            except Exception:
+                continue
+
+        if repaired:
+            try:
+                _ORIGINAL_UPDATE_TEAM_FROM_REQUEST(self, side, strict_battle_tracking)
+                return
+            except KeyError:
+                pass
+
+        # Last-resort graceful path: avoid raising and update what we can.
+        for pokemon in pokemon_payload:
+            if not isinstance(pokemon, dict):
+                continue
+            ident = str(pokemon.get("ident", "") or "")
+            if not ident:
+                continue
+            details = str(pokemon.get("details", "") or "")
+            mon = self.team.get(ident)
+            if mon is None:
+                try:
+                    mon = self.get_pokemon(
+                        ident,
+                        force_self_team=True,
+                        details=details,
+                        request=pokemon,
+                    )
+                except Exception:
+                    continue
+            try:
+                mon.update_from_request(pokemon)
+            except Exception:
+                continue
+
+    AbstractBattle._update_team_from_request = _psai_update_team_from_request
+
+
+_install_poke_env_request_team_guard()
 
 # ========================================
 # Getting Battles, States, Player, and Player Actions
@@ -290,6 +368,711 @@ def send_confirmed_move(player: Any, battle: Any, chosen_action: Any) -> Any:
 
     selected_switch = list(battle.available_switches)[action_index - 1]
     return player.create_order(selected_switch)
+
+
+def _format_status_text(status: str | None) -> str:
+    return str(status or "none")
+
+
+def _format_types_text(types: tuple[str, ...]) -> str:
+    if not types:
+        return "unknown"
+    return "/".join(types)
+
+
+def _format_boosts_text(boosts: dict[str, int]) -> str:
+    non_zero = [f"{name}:{value:+d}" for name, value in boosts.items() if int(value) != 0]
+    return ", ".join(non_zero) if non_zero else "-"
+
+
+def _format_hp_percent(hp_fraction: float) -> str:
+    return f"{max(0.0, min(1.0, float(hp_fraction))) * 100.0:.1f}%"
+
+
+def _extract_pokemon_hp_fraction(raw_pokemon: Any) -> float | None:
+    for attr_name in ("current_hp_fraction", "hp_fraction"):
+        value = getattr(raw_pokemon, attr_name, None)
+        if value is None:
+            continue
+        try:
+            return max(0.0, min(1.0, float(value)))
+        except (TypeError, ValueError):
+            continue
+
+    current_hp = getattr(raw_pokemon, "current_hp", None)
+    max_hp = getattr(raw_pokemon, "max_hp", None)
+    try:
+        current_hp_value = float(current_hp)
+        max_hp_value = float(max_hp)
+    except (TypeError, ValueError):
+        return None
+    if max_hp_value <= 0:
+        return None
+    return max(0.0, min(1.0, current_hp_value / max_hp_value))
+
+
+def _extract_pokemon_status_text(raw_pokemon: Any) -> str:
+    status = getattr(raw_pokemon, "status", None)
+    if status is None:
+        return "none"
+    return str(getattr(status, "name", status))
+
+
+def _extract_pokemon_types_text(raw_pokemon: Any) -> str:
+    types = getattr(raw_pokemon, "types", None)
+    if not types:
+        return "unknown"
+    names: list[str] = []
+    for pokemon_type in tuple(types):
+        if pokemon_type is None:
+            continue
+        names.append(str(getattr(pokemon_type, "name", pokemon_type)))
+    return "/".join(names) if names else "unknown"
+
+
+def _render_ascii_battle_view(
+    state: State,
+    battle: Any,
+    *,
+    board_width: int = 96,
+) -> str:
+    inner_width = max(40, board_width - 4)
+
+    def _line(text: str = "") -> str:
+        clipped = text[:inner_width]
+        return f"| {clipped:<{inner_width}} |"
+
+    border = "+" + "-" * (inner_width + 2) + "+"
+    battle_tag = str(getattr(battle, "battle_tag", "") or "unknown")
+    turn_value = state.turn_number if state.turn_number is not None else state.turn
+
+    opponent = state.opponent_active
+    friendly = state.friendly_active
+    active_section = [
+        border,
+        _line(f"Battle {battle_tag} | Turn {turn_value} | Mode: {state.request_mode}"),
+        border,
+        _line("TOP HALF: Active Pokemon"),
+        _line(
+            f"Opponent: {opponent.species} | HP { _format_hp_percent(opponent.hp_fraction) } | "
+            f"Status { _format_status_text(opponent.status) } | Types { _format_types_text(opponent.types) }"
+        ),
+        _line(f"Opponent boosts: {_format_boosts_text(opponent.boosts)}"),
+        _line(
+            f"You:      {friendly.species} | HP { _format_hp_percent(friendly.hp_fraction) } | "
+            f"Status { _format_status_text(friendly.status) } | Types { _format_types_text(friendly.types) }"
+        ),
+        _line(f"Your boosts: {_format_boosts_text(friendly.boosts)}"),
+        border,
+        _line("BOTTOM HALF: Available Actions"),
+    ]
+
+    available_moves = list(getattr(battle, "available_moves", []) or [])
+    available_switches = list(getattr(battle, "available_switches", []) or [])
+
+    if available_moves:
+        active_section.append(_line("Moves:"))
+        for index, move in enumerate(available_moves, start=1):
+            move_name = str(getattr(move, "id", None) or getattr(move, "move", None) or f"move_{index}")
+            pp_current = getattr(move, "current_pp", None)
+            if pp_current is None:
+                pp_current = getattr(move, "pp", None)
+            pp_max = getattr(move, "max_pp", None)
+            if pp_max is None:
+                pp_max = getattr(move, "maxpp", None)
+            pp_text = f" PP {pp_current}/{pp_max}" if pp_current is not None and pp_max is not None else ""
+            move_type = getattr(move, "type", None)
+            move_type_text = str(getattr(move_type, "name", move_type)) if move_type is not None else "unknown"
+            active_section.append(_line(f"  [{index}] {move_name} | Type {move_type_text}{pp_text}"))
+    else:
+        active_section.append(_line("Moves: none"))
+
+    if available_switches:
+        active_section.append(_line("Switches:"))
+        for index, switch_target in enumerate(available_switches, start=1):
+            switch_name = str(
+                getattr(switch_target, "species", None)
+                or getattr(switch_target, "name", None)
+                or f"switch_{index}"
+            )
+            hp_fraction = _extract_pokemon_hp_fraction(switch_target)
+            hp_text = _format_hp_percent(hp_fraction) if hp_fraction is not None else "unknown"
+            status_text = _extract_pokemon_status_text(switch_target)
+            types_text = _extract_pokemon_types_text(switch_target)
+            active_section.append(
+                _line(f"  [{index}] {switch_name} | HP {hp_text} | Status {status_text} | Types {types_text}")
+            )
+    else:
+        active_section.append(_line("Switches: none"))
+
+    active_section.append(border)
+    return "\n".join(active_section)
+
+
+def _print_ranked_suggestions_short(turn_suggestions: list[MoveSuggestion], *, top_k: int = 3) -> None:
+    print("Top model suggestions:")
+    if not turn_suggestions:
+        print("  (none available for this request)")
+        return
+
+    for suggestion in turn_suggestions[: max(1, int(top_k))]:
+        reason_text = "; ".join(suggestion.reasons[:2]) if suggestion.reasons else "no breakdown available"
+        print(
+            f"  #{suggestion.rank} {suggestion.action.action_id} "
+            f"(score={suggestion.score:.2f}) -> {reason_text}"
+        )
+
+
+def _timed_input(prompt: str, timeout_seconds: float) -> str | None:
+    timeout = max(0.0, float(timeout_seconds))
+    print(prompt, end="", flush=True)
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], timeout)
+    except Exception:
+        try:
+            value = input()
+        except EOFError:
+            return None
+        return value.strip()
+
+    if not ready:
+        print("")
+        return None
+
+    line = sys.stdin.readline()
+    if line == "":
+        return None
+    return line.strip()
+
+
+def _build_recommendation_ranks(turn_suggestions: list[MoveSuggestion]) -> dict[str, int]:
+    ranks: dict[str, int] = {}
+    for suggestion in turn_suggestions:
+        action_id = str(getattr(suggestion.action, "action_id", "") or "")
+        if action_id and action_id not in ranks:
+            ranks[action_id] = int(suggestion.rank)
+    return ranks
+
+
+def _recommendation_suffix(action_id: str, rank_lookup: dict[str, int]) -> str:
+    rank = rank_lookup.get(action_id)
+    if rank is None:
+        return ""
+    return f" (recommended #{rank})"
+
+
+def _extract_request_remaining_seconds(battle: Any) -> int | None:
+    request = getattr(battle, "_last_request", None)
+    candidate_values: list[Any] = []
+
+    if isinstance(request, dict):
+        for key in (
+            "secondsLeft",
+            "secondsleft",
+            "timeLeft",
+            "timeleft",
+            "remaining",
+            "remainingSeconds",
+            "maxMoveTime",
+            "maxmovetime",
+            "timer",
+        ):
+            candidate_values.append(request.get(key))
+        side_payload = request.get("side")
+        if isinstance(side_payload, dict):
+            for key in ("secondsLeft", "timeLeft", "remaining", "timer"):
+                candidate_values.append(side_payload.get(key))
+
+    for attr_name in ("seconds_left", "time_left", "remaining_seconds", "remaining_time"):
+        candidate_values.append(getattr(battle, attr_name, None))
+
+    for raw_value in candidate_values:
+        if raw_value is None:
+            continue
+        try:
+            seconds = int(float(raw_value))
+        except (TypeError, ValueError):
+            continue
+        if seconds >= 0:
+            return seconds
+    return None
+
+
+def _prompt_user_choice_for_request(
+    player: Any,
+    battle: Any,
+    state: State,
+    turn_suggestions: list[MoveSuggestion],
+    *,
+    user_timeout_seconds: float = 60.0,
+) -> tuple[Any, str]:
+    auto_order, auto_action_id = _choose_order_for_request(
+        player,
+        battle,
+        state,
+        turn_suggestions,
+    )
+
+    request_seconds_remaining = _extract_request_remaining_seconds(battle)
+    if request_seconds_remaining is not None and request_seconds_remaining <= 30:
+        print(
+            f"[manual] timer is at {request_seconds_remaining}s. "
+            "Auto-selecting #1 ranked move."
+        )
+        return auto_order, auto_action_id
+
+    available_moves = list(getattr(battle, "available_moves", []) or [])
+    available_switches = list(getattr(battle, "available_switches", []) or [])
+    if not available_moves and not available_switches:
+        print("[manual] no selectable actions found. Using automatic fallback.")
+        return auto_order, auto_action_id
+
+    recommendation_ranks = _build_recommendation_ranks(turn_suggestions)
+    deadline = time.time() + max(1.0, float(user_timeout_seconds))
+
+    while True:
+        request_seconds_remaining = _extract_request_remaining_seconds(battle)
+        if request_seconds_remaining is not None and request_seconds_remaining <= 30:
+            print(
+                f"[manual] timer is at {request_seconds_remaining}s. "
+                "Auto-selecting #1 ranked move."
+            )
+            return auto_order, auto_action_id
+
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            print("[manual] no user selection within 60 seconds. Auto-selecting #1 ranked move.")
+            return auto_order, auto_action_id
+
+        print("1. Attack")
+        print("2. Switch")
+        print("3. Forfeit")
+        mode_choice = _timed_input(
+            f"Choose 1, 2, or 3 ({int(max(1, remaining))}s left): ",
+            min(remaining, 20.0),
+        )
+        if mode_choice is None:
+            continue
+        if mode_choice not in {"1", "2", "3"}:
+            print("[manual] invalid choice; please enter 1, 2, or 3.")
+            continue
+
+        if mode_choice == "3":
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                print("[manual] input timed out. Auto-selecting #1 ranked move.")
+                return auto_order, auto_action_id
+            confirmation = _timed_input(
+                f"Type FORFEIT to confirm ({int(max(1, remaining))}s left): ",
+                min(remaining, 20.0),
+            )
+            if confirmation is None:
+                continue
+            if confirmation.strip().lower() != "forfeit":
+                print("[manual] forfeit cancelled.")
+                continue
+            chosen_order = player.create_order("/forfeit")
+            return chosen_order, "forfeit"
+
+        if mode_choice == "1":
+            if not available_moves:
+                print("[manual] no attack options available this turn.")
+                continue
+            print("Attack options:")
+            for index, move in enumerate(available_moves, start=1):
+                action_id = _move_action_id_from_move(move)
+                move_name = str(getattr(move, "id", None) or getattr(move, "move", None) or f"move_{index}")
+                suffix = _recommendation_suffix(action_id, recommendation_ranks)
+                print(f"  {index}. {move_name}{suffix}")
+
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                print("[manual] input timed out. Auto-selecting #1 ranked move.")
+                return auto_order, auto_action_id
+            slot_text = _timed_input(
+                f"Select attack number ({int(max(1, remaining))}s left): ",
+                min(remaining, 20.0),
+            )
+            if slot_text is None:
+                continue
+            try:
+                slot_index = int(slot_text)
+            except ValueError:
+                print("[manual] invalid attack selection.")
+                continue
+            if slot_index < 1 or slot_index > len(available_moves):
+                print("[manual] attack selection is out of range.")
+                continue
+
+            selected_move = available_moves[slot_index - 1]
+            chosen_order = player.create_order(f"/choose move {slot_index}")
+            chosen_action_id = _move_action_id_from_move(selected_move)
+            return chosen_order, chosen_action_id
+
+        if not available_switches:
+            print("[manual] no switch options available this turn.")
+            continue
+        print("Switch options:")
+        for index, switch_target in enumerate(available_switches, start=1):
+            action_id = _switch_action_id_from_target(switch_target)
+            switch_name = str(
+                getattr(switch_target, "species", None)
+                or getattr(switch_target, "name", None)
+                or f"switch_{index}"
+            )
+            suffix = _recommendation_suffix(action_id, recommendation_ranks)
+            print(f"  {index}. {switch_name}{suffix}")
+
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            print("[manual] input timed out. Auto-selecting #1 ranked move.")
+            return auto_order, auto_action_id
+        slot_text = _timed_input(
+            f"Select switch number ({int(max(1, remaining))}s left): ",
+            min(remaining, 20.0),
+        )
+        if slot_text is None:
+            continue
+        try:
+            slot_index = int(slot_text)
+        except ValueError:
+            print("[manual] invalid switch selection.")
+            continue
+        if slot_index < 1 or slot_index > len(available_switches):
+            print("[manual] switch selection is out of range.")
+            continue
+
+        selected_switch = available_switches[slot_index - 1]
+        chosen_order = player.create_order(selected_switch)
+        chosen_action_id = _switch_action_id_from_target(selected_switch)
+        return chosen_order, chosen_action_id
+
+
+def _manual_wait_for_active_battle(
+    player: Any,
+    *,
+    phase_label: str,
+    waiting_message: str,
+    runner: AsyncConnectionRunner | None = None,
+    allow_requeue: bool = False,
+    timeout_seconds: float = 180.0,
+) -> tuple[Any | None, AsyncConnectionRunner | None]:
+    wait_started_at = time.time()
+    runner_started_at = time.time()
+    idle_requeue_attempts = 0
+    last_wait_notice_at = 0.0
+
+    while True:
+        runner = _resolve_runner_state(
+            runner,
+            player=player,
+            phase_label=phase_label,
+            verbose=True,
+        )
+
+        battles = dict(getattr(player, "battles", {}) or {})
+        for battle in battles.values():
+            if not getattr(battle, "finished", False):
+                return battle, runner
+
+        now = time.time()
+        if now - last_wait_notice_at >= 5.0:
+            elapsed = now - wait_started_at
+            print(f"[{phase_label}] {waiting_message} ({elapsed:.1f}s)")
+            last_wait_notice_at = now
+
+        if now - wait_started_at >= max(1.0, timeout_seconds):
+            return None, runner
+
+        if allow_requeue and runner is not None and not runner.done:
+            idle_seconds = now - runner_started_at
+            if idle_seconds >= 45.0:
+                idle_requeue_attempts += 1
+                force_recovery = idle_requeue_attempts >= 4
+                print(
+                    f"[{phase_label}] idle_without_battle for {idle_seconds:.1f}s; "
+                    "attempting ladder requeue"
+                )
+                if force_recovery:
+                    print(
+                        f"[{phase_label}] prolonged idle detected "
+                        f"(attempt={idle_requeue_attempts}); forcing recovery"
+                    )
+                _safe_requeue_ladder_search(
+                    player,
+                    phase_label=phase_label,
+                    verbose=True,
+                    force=force_recovery,
+                )
+                runner_started_at = time.time()
+
+        time.sleep(0.2)
+
+
+def _write_player_wr_log(
+    path: Path,
+    *,
+    battle: Any,
+    result: str,
+    mode: str,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "timestamp_utc": datetime.utcnow().isoformat() + "Z",
+        "battle_tag": str(getattr(battle, "battle_tag", "") or ""),
+        "mode": str(mode),
+        "opponent": str(getattr(battle, "opponent_username", None) or "unknown"),
+        "result": str(result),
+        "turns": int(getattr(battle, "turn", 0) or 0),
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload))
+        handle.write("\n")
+
+
+def _print_player_wr_summary(path: Path) -> None:
+    if not path.exists():
+        print("No all-time winrate records yet.")
+        return
+
+    wins = 0
+    losses = 0
+    ties = 0
+    total = 0
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            total += 1
+            result = str(payload.get("result", "")).strip().lower()
+            if result == "win":
+                wins += 1
+            elif result == "loss":
+                losses += 1
+            else:
+                ties += 1
+
+    wr = (wins / (wins + losses)) if (wins + losses) > 0 else 0.0
+    print("All-time Battle Record")
+    print(f"  Total battles: {total}")
+    print(f"  Wins: {wins}")
+    print(f"  Losses: {losses}")
+    print(f"  Ties/Other: {ties}")
+    print(f"  Win rate (excl ties): {wr * 100.0:.2f}%")
+
+
+def _print_outcome_banner(result: str) -> None:
+    if result == "win":
+        banner = [
+            "+-----------------------------+",
+            "|           VICTORY           |",
+            "+-----------------------------+",
+        ]
+    elif result == "loss":
+        banner = [
+            "+-----------------------------+",
+            "|            DEFEAT           |",
+            "+-----------------------------+",
+        ]
+    else:
+        banner = [
+            "+-----------------------------+",
+            "|             TIE             |",
+            "+-----------------------------+",
+        ]
+    for line in banner:
+        print(line)
+
+
+def _safe_wait_until_logged_in(player: Any, *, timeout_seconds: float = 30.0) -> bool:
+    ps_client = getattr(player, "ps_client", None)
+    logged_in_event = getattr(ps_client, "logged_in", None)
+    loop = getattr(ps_client, "loop", None)
+    if ps_client is None or logged_in_event is None or loop is None:
+        return False
+    if logged_in_event.is_set():
+        return True
+    try:
+        future = asyncio.run_coroutine_threadsafe(logged_in_event.wait(), loop)
+        future.result(timeout=max(1.0, timeout_seconds))
+        return True
+    except Exception:
+        return False
+
+
+def _safe_send_challenge(
+    player: Any,
+    opponent_name: str,
+    *,
+    phase_label: str = "manual",
+) -> bool:
+    opponent = str(opponent_name or "").strip()
+    if not opponent:
+        return False
+    if not _safe_wait_until_logged_in(player):
+        print(f"[{phase_label}] failed to confirm logged-in session before challenge.")
+        return False
+
+    ps_client = getattr(player, "ps_client", None)
+    loop = getattr(ps_client, "loop", None)
+    if ps_client is None or loop is None:
+        return False
+
+    packed_team = player.get_next_team() if hasattr(player, "get_next_team") else None
+    battle_format = str(getattr(player, "format", "") or getattr(player, "_configured_battle_format", "gen1randombattle"))
+    try:
+        future = asyncio.run_coroutine_threadsafe(
+            ps_client.challenge(opponent, battle_format, packed_team),
+            loop,
+        )
+        future.result(timeout=10.0)
+        return True
+    except Exception as exc:
+        print(f"[{phase_label}] challenge_failed error={type(exc).__name__}: {exc}")
+        return False
+
+
+def _run_manual_connected_battle(
+    player: Any,
+    *,
+    mechanics: MechanicsAPI,
+    top_k: int,
+    model: ModelBonusFn | None,
+    launch_mode: str,
+    runner: AsyncConnectionRunner | None = None,
+    waiting_message: str,
+    wr_log_path: Path,
+    max_turns: int | None = None,
+    user_timeout_seconds: float = 60.0,
+) -> None:
+    battle, runner = _manual_wait_for_active_battle(
+        player,
+        phase_label="manual",
+        waiting_message=waiting_message,
+        runner=runner,
+        allow_requeue=(launch_mode == "ladder"),
+        timeout_seconds=240.0 if launch_mode == "ladder" else 180.0,
+    )
+    if battle is None:
+        print("[manual] no battle was found before timeout. Returning to menu.")
+        return
+
+    battle_tag = str(getattr(battle, "battle_tag", id(battle)) or id(battle))
+    print(f"[manual] connected to battle {battle_tag}")
+
+    previous_pending_timeout = float(getattr(player, "_pending_order_timeout_seconds", 15.0))
+    if hasattr(player, "_pending_order_timeout_seconds"):
+        setattr(player, "_pending_order_timeout_seconds", max(previous_pending_timeout, user_timeout_seconds + 10.0))
+
+    turns_ran = 0
+    last_prompted_request: tuple[Any, ...] | None = None
+    last_prompted_at = 0.0
+    last_submitted_order: Any | None = None
+    retry_same_request_after_seconds = 15.0
+    manual_forfeit_requested = False
+
+    try:
+        while True:
+            battles = dict(getattr(player, "battles", {}) or {})
+            battle = battles.get(battle_tag, battle)
+            if getattr(battle, "finished", False):
+                break
+
+            _safe_ensure_battle_timer_on(player, battle_tag, phase_label="manual", verbose=True)
+            request_signature = _battle_request_signature(battle)
+            now = time.time()
+            if last_prompted_request == request_signature:
+                elapsed = now - last_prompted_at
+                if elapsed >= retry_same_request_after_seconds and last_submitted_order is not None:
+                    print(
+                        f"[manual] request_stalled battle={battle_tag} "
+                        f"waited={elapsed:.1f}s; resubmitting latest order"
+                    )
+                    if hasattr(player, "set_pending_order"):
+                        player.set_pending_order(battle_tag, last_submitted_order)
+                    last_prompted_at = now
+                time.sleep(0.1)
+                continue
+
+            try:
+                state = parse_battle_to_state(battle)
+            except Exception as exc:
+                print(
+                    f"[manual] parse_state_failed battle={battle_tag} "
+                    f"error={type(exc).__name__}: {exc}. Sending default order."
+                )
+                chosen_order = _default_order(player)
+                if hasattr(player, "set_pending_order"):
+                    player.set_pending_order(battle_tag, chosen_order)
+                last_prompted_request = request_signature
+                last_prompted_at = now
+                last_submitted_order = chosen_order
+                continue
+
+            if not _has_actionable_request(state, battle):
+                time.sleep(0.1)
+                continue
+
+            turn_suggestions = (
+                get_turn_suggestions(state, mechanics, top_k=top_k, model=model)
+                if state.legal_actions
+                else []
+            )
+
+            print(_render_ascii_battle_view(state, battle))
+            _print_ranked_suggestions_short(turn_suggestions, top_k=top_k)
+            chosen_order, chosen_action_id = _prompt_user_choice_for_request(
+                player,
+                battle,
+                state,
+                turn_suggestions,
+                user_timeout_seconds=user_timeout_seconds,
+            )
+            print(f"[manual] selected action: {chosen_action_id}")
+
+            if hasattr(player, "set_pending_order"):
+                player.set_pending_order(battle_tag, chosen_order)
+
+            last_prompted_request = request_signature
+            last_prompted_at = now
+            last_submitted_order = chosen_order
+
+            if chosen_action_id == "forfeit":
+                manual_forfeit_requested = True
+                print("[manual] forfeit submitted.")
+                break
+
+            turns_ran += 1
+            if max_turns is not None and turns_ran >= max_turns:
+                print(f"[manual] max_turns={max_turns} reached; stopping manual battle loop.")
+                break
+
+            time.sleep(0.1)
+    finally:
+        if hasattr(player, "_pending_order_timeout_seconds"):
+            setattr(player, "_pending_order_timeout_seconds", previous_pending_timeout)
+
+    outcome_value, result_label = _battle_outcome_value(battle)
+    if manual_forfeit_requested:
+        outcome_value = -1.0
+        result_label = "loss"
+
+    if getattr(battle, "finished", False) or manual_forfeit_requested:
+        _print_outcome_banner(result_label)
+        _write_player_wr_log(
+            wr_log_path,
+            battle=battle,
+            result=result_label,
+            mode=launch_mode,
+        )
+        _safe_cleanup_finished_battle(player, battle_tag, phase_label="manual", verbose=True)
+    else:
+        print("[manual] battle loop ended before battle finished.")
 
 # ========================================
 # Internal Request and Order Helpers
@@ -586,47 +1369,92 @@ def run_battle(
     top_k: int = 3,
     model: ModelBonusFn | None = None,
     max_turns: int | None = None,
+    wr_log_path: str | Path = "training/player_WR_log.jsonl",
+    user_timeout_seconds: float = 60.0,
+    runtime_log_path: str | Path = "training/battle_logs.jsonl",
+    runtime_artifact_dir: str | Path = "training/artifacts",
+    runtime_model_bonus_weight: float = 90.0,
+    runtime_default_hidden_sizes: tuple[int, ...] = (256, 128),
 ) -> None:
-
-    # Main product/manual suggestion flow.
-
-    turns_ran = 0
+    # Manual product mode menu:
+    # 1) Ladder game
+    # 2) Challenge a player
+    # 3) View all-time win rate
+    # 4) Quit
+    wr_log = Path(wr_log_path)
+    resolved_model = model
+    if resolved_model is None:
+        resolved_model, checkpoint_path = _load_runtime_model_bonus(
+            log_path=runtime_log_path,
+            artifact_dir=runtime_artifact_dir,
+            model_bonus_weight=runtime_model_bonus_weight,
+            default_hidden_sizes=runtime_default_hidden_sizes,
+        )
+        if checkpoint_path is None:
+            print("[manual] launching with heuristic-only suggestions.")
 
     while True:
-        battle = get_battle(player)
+        print("")
+        print("==============================================")
+        print("Pokemon AI Console Menu")
+        print("1. Connect to a ladder game")
+        print("2. Challenge a player")
+        print("3. View my all-time winrate")
+        print("4. Quit")
+        print("==============================================")
+        menu_choice = input("Select option (1-4): ").strip()
 
-        if battle is None:
-            break
-
-        if getattr(battle, "finished", False):
-            break
-
-        battle_tag = str(getattr(battle, "battle_tag", id(battle)) or id(battle))
-        _safe_ensure_battle_timer_on(player, battle_tag, phase_label="manual", verbose=False)
-
-        state = get_state(battle)
-        turn_suggestions = get_turn_suggestions(state, mechanics, top_k=top_k, model=model)
-
-        for suggestion in turn_suggestions:
-            print(
-                f"#{suggestion.rank} {suggestion.action.move_name} "
-                f"(score={suggestion.score:.2f})"
+        if menu_choice == "1":
+            print("[manual] launching ladder game...")
+            _safe_reset_battles(player)
+            runner = _launch_single_game(player)
+            _run_manual_connected_battle(
+                player,
+                mechanics=mechanics,
+                top_k=top_k,
+                model=resolved_model,
+                launch_mode="ladder",
+                runner=runner,
+                waiting_message="waiting for ladder opponent",
+                wr_log_path=wr_log,
+                max_turns=max_turns,
+                user_timeout_seconds=user_timeout_seconds,
             )
-            for reason in suggestion.reasons:
-                print(f"  - {reason}")
+            continue
 
-        chosen_action = get_user_choice(turn_suggestions, battle)
-        chosen_order = send_confirmed_move(player, battle, chosen_action)
+        if menu_choice == "2":
+            opponent_name = input("Enter player name to challenge: ").strip()
+            if not opponent_name:
+                print("[manual] challenge cancelled: no opponent entered.")
+                continue
+            _safe_reset_battles(player)
+            print(f"[manual] sending challenge to {opponent_name}...")
+            if not _safe_send_challenge(player, opponent_name, phase_label="manual"):
+                print("[manual] challenge was not sent. Returning to menu.")
+                continue
+            _run_manual_connected_battle(
+                player,
+                mechanics=mechanics,
+                top_k=top_k,
+                model=resolved_model,
+                launch_mode="challenge",
+                runner=None,
+                waiting_message=f"waiting for {opponent_name} to accept challenge",
+                wr_log_path=wr_log,
+                max_turns=max_turns,
+                user_timeout_seconds=user_timeout_seconds,
+            )
+            continue
 
-        if hasattr(player, "set_pending_order"):
-            battle_tag = str(getattr(battle, "battle_tag", id(battle)) or id(battle))
-            player.set_pending_order(battle_tag, chosen_order)
+        if menu_choice == "3":
+            _print_player_wr_summary(wr_log)
+            continue
 
-        turns_ran += 1
-        if max_turns is not None and turns_ran >= max_turns:
+        if menu_choice == "4":
+            print("[manual] exiting menu.")
             break
 
-        time.sleep(0.1)
+        print("[manual] invalid menu option. Please select 1-4.")
 
 
 def run_training_battle(
@@ -940,7 +1768,7 @@ def _normalize_training_config(training_config: Any | None) -> dict[str, Any] | 
 
 
 def _extract_cycle_id_from_checkpoint(checkpoint_path: Path) -> int | None:
-    match = re.fullmatch(r"policy_value_cycle_(\d+)\.pt", checkpoint_path.name)
+    match = re.fullmatch(r"policy_value_cycle_(\d+)(?:_run_\d+)?\.pt", checkpoint_path.name)
     if not match:
         return None
     try:
@@ -1013,8 +1841,45 @@ def _write_model_progress(
 ) -> None:
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing_entries: list[dict[str, Any]] = []
+    if output_path.exists():
+        try:
+            existing_payload = json.loads(output_path.read_text(encoding="utf-8"))
+        except Exception:
+            existing_payload = None
+
+        if isinstance(existing_payload, list):
+            existing_entries = [dict(entry) for entry in existing_payload if isinstance(entry, dict)]
+        elif isinstance(existing_payload, dict):
+            models_list = existing_payload.get("models")
+            if isinstance(models_list, list):
+                existing_entries = [dict(entry) for entry in models_list if isinstance(entry, dict)]
+            elif "models_evaluation_stats" in existing_payload:
+                existing_entries = [dict(existing_payload)]
+
+    def _entry_key(entry: dict[str, Any]) -> tuple[str, str]:
+        checkpoint = str(entry.get("checkpoint_path", "") or "")
+        model_name = str(entry.get("modelname", "") or "")
+        return checkpoint, model_name
+
+    new_entry = dict(payload)
+    new_key = _entry_key(new_entry)
+    replaced = False
+    for index, entry in enumerate(existing_entries):
+        if _entry_key(entry) == new_key:
+            existing_entries[index] = new_entry
+            replaced = True
+            break
+    if not replaced:
+        existing_entries.append(new_entry)
+
+    output_document = {
+        "models": existing_entries,
+        "latest": existing_entries[-1] if existing_entries else new_entry,
+    }
     with output_path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
+        json.dump(output_document, handle, indent=2, sort_keys=True)
     if verbose:
         print(f"[eval] wrote model progress -> {output_path}")
 
@@ -1037,6 +1902,8 @@ def run_evaluation_games(
     print_turn_suggestions: bool = True,
     model_progress_path: str | Path | None = None,
     training_config: Any | None = None,
+    champion_min_delta: float = 0.03,
+    champion_min_games: int = 300,
 ) -> dict[str, Any]:
     # Alright, this is where we run evaluation for the model. Frankly, it should be its own function,
     # I just wanted to have everything in one place and didnt realize until it was too late just how long this section would be.
@@ -1049,6 +1916,9 @@ def run_evaluation_games(
     # Unless by some miracle the model is hitting 50%+ winrate off of the FIRST run, in which case shoot for the stars.
 
     # Majority of this code is just the various guard code related stuff, now moved to main for organization.
+    
+    # we now also use a champion system for determining our current best model, where whenever a new model is trained,
+    # it is compared to the current "champion" or best model, and depnding on the results a new king is crowned.
 
     artifact_root = Path(artifact_dir)
     resolved_checkpoint_path = Path(checkpoint_path)
@@ -1293,6 +2163,88 @@ def run_evaluation_games(
         )
 
     gate_passed = bool(evaluation["win_rate"] >= float(eval_threshold))
+
+    # Champion/challenger promotion:
+    # Promote challenger if it beats current champion by at least champion_min_delta
+    # on at least champion_min_games evaluated games.
+    best_pointer_path = artifact_root / "best_model.json"
+    existing_champion_payload: dict[str, Any] | None = None
+    if best_pointer_path.exists():
+        try:
+            existing_champion_payload = dict(json.loads(best_pointer_path.read_text(encoding="utf-8")))
+        except Exception:
+            existing_champion_payload = None
+
+    champion_checkpoint_before = None
+    champion_win_rate_before = None
+    if isinstance(existing_champion_payload, dict):
+        checkpoint_value = str(existing_champion_payload.get("checkpoint_path", "")).strip()
+        if checkpoint_value:
+            champion_checkpoint_before = checkpoint_value
+        try:
+            champion_win_rate_before = float(existing_champion_payload.get("win_rate"))
+        except (TypeError, ValueError):
+            champion_win_rate_before = None
+
+    challenger_checkpoint = str(resolved_checkpoint_path)
+    challenger_win_rate = float(evaluation["win_rate"])
+    resolved_min_delta = max(0.0, float(champion_min_delta))
+    resolved_min_games = max(1, int(champion_min_games))
+    meets_min_games = int(evaluation["games"]) >= resolved_min_games
+    is_same_checkpoint = bool(champion_checkpoint_before) and champion_checkpoint_before == challenger_checkpoint
+
+    champion_promoted = False
+    promotion_reason = ""
+
+    if is_same_checkpoint:
+        promotion_reason = "challenger_is_current_champion"
+    elif champion_checkpoint_before is None or champion_win_rate_before is None:
+        # No champion exists yet: accept this challenger as initial champion.
+        champion_promoted = True
+        promotion_reason = "no_existing_champion"
+    elif not meets_min_games:
+        promotion_reason = (
+            f"insufficient_eval_games:{int(evaluation['games'])}<{resolved_min_games}"
+        )
+    elif challenger_win_rate >= (champion_win_rate_before + resolved_min_delta):
+        champion_promoted = True
+        promotion_reason = "challenger_beats_champion"
+    else:
+        win_rate_delta = challenger_win_rate - champion_win_rate_before
+        promotion_reason = (
+            f"delta_below_requirement:{win_rate_delta:.4f}<{resolved_min_delta:.4f}"
+        )
+
+    champion_checkpoint_after = champion_checkpoint_before
+    champion_win_rate_after = champion_win_rate_before
+
+    if champion_promoted:
+        champion_checkpoint_after = challenger_checkpoint
+        champion_win_rate_after = challenger_win_rate
+        best_pointer_payload = {
+            "checkpoint_path": challenger_checkpoint,
+            "win_rate": challenger_win_rate,
+            "games": int(evaluation["games"]),
+            "promoted_at_utc": datetime.utcnow().isoformat() + "Z",
+            "promotion_rule": {
+                "min_delta": resolved_min_delta,
+                "min_games": resolved_min_games,
+            },
+        }
+        best_pointer_path.parent.mkdir(parents=True, exist_ok=True)
+        with best_pointer_path.open("w", encoding="utf-8") as handle:
+            json.dump(best_pointer_payload, handle, indent=2, sort_keys=True)
+        if verbose:
+            print(
+                f"[eval] champion_promoted checkpoint={challenger_checkpoint} "
+                f"win_rate={challenger_win_rate:.3f}"
+            )
+    elif verbose:
+        print(
+            f"[eval] champion_retained checkpoint={champion_checkpoint_before} "
+            f"reason={promotion_reason}"
+        )
+
     progress_payload = _build_model_progress_payload(
         model_name=resolved_model_name,
         evaluation=evaluation,
@@ -1304,6 +2256,14 @@ def run_evaluation_games(
     evaluation["modelname"] = resolved_model_name
     evaluation["eval_threshold"] = float(eval_threshold)
     evaluation["gate_passed"] = gate_passed
+    evaluation["champion_promoted"] = bool(champion_promoted)
+    evaluation["promotion_reason"] = str(promotion_reason)
+    evaluation["champion_checkpoint_before"] = champion_checkpoint_before
+    evaluation["champion_win_rate_before"] = champion_win_rate_before
+    evaluation["champion_checkpoint_after"] = champion_checkpoint_after
+    evaluation["champion_win_rate_after"] = champion_win_rate_after
+    evaluation["champion_min_delta"] = resolved_min_delta
+    evaluation["champion_min_games"] = resolved_min_games
     return evaluation
 
 
@@ -1335,6 +2295,100 @@ def _resolve_best_checkpoint_path(artifact_dir: str | Path = "training/artifacts
         checkpoint_path = Path.cwd() / checkpoint_path
     return checkpoint_path.resolve()
 
+
+def _infer_hidden_sizes_from_checkpoint(checkpoint_path: str | Path) -> tuple[int, ...]:
+    try:
+        import torch
+    except Exception:
+        return ()
+
+    try:
+        payload = torch.load(Path(checkpoint_path), map_location="cpu")
+    except Exception:
+        return ()
+
+    if not isinstance(payload, dict):
+        return ()
+    state_dict = payload.get("model_state_dict")
+    if not isinstance(state_dict, dict):
+        return ()
+
+    discovered: list[tuple[int, int]] = []
+    for key, tensor in state_dict.items():
+        match = re.fullmatch(r"trunk\.(\d+)\.weight", str(key))
+        if match is None:
+            continue
+        shape = getattr(tensor, "shape", None)
+        if shape is None or len(shape) != 2:
+            continue
+        try:
+            layer_index = int(match.group(1))
+            out_dim = int(shape[0])
+        except Exception:
+            continue
+        discovered.append((layer_index, out_dim))
+
+    discovered.sort(key=lambda item: item[0])
+    return tuple(out_dim for _, out_dim in discovered)
+
+
+def _load_runtime_model_bonus(
+    *,
+    log_path: str | Path = "training/battle_logs.jsonl",
+    artifact_dir: str | Path = "training/artifacts",
+    model_bonus_weight: float = 90.0,
+    default_hidden_sizes: tuple[int, ...] = (256, 128),
+) -> tuple[ModelBonusFn | None, Path | None]:
+    try:
+        checkpoint_path = _resolve_best_checkpoint_path(artifact_dir)
+    except Exception as exc:
+        print(
+            "[manual] no checkpoint found; using heuristic-only suggestions "
+            f"({type(exc).__name__}: {exc})"
+        )
+        return None, None
+
+    records = read_log_records(log_path)
+    if not records:
+        print("[manual] no battle logs found; using heuristic-only suggestions.")
+        return None, checkpoint_path
+
+    candidate_hidden_sizes: list[tuple[int, ...]] = []
+    inferred_hidden_sizes = _infer_hidden_sizes_from_checkpoint(checkpoint_path)
+    if inferred_hidden_sizes:
+        candidate_hidden_sizes.append(inferred_hidden_sizes)
+    if tuple(default_hidden_sizes) not in candidate_hidden_sizes:
+        candidate_hidden_sizes.append(tuple(default_hidden_sizes))
+    for fallback in ((128, 64),):
+        if fallback not in candidate_hidden_sizes:
+            candidate_hidden_sizes.append(fallback)
+
+    input_dim = len(records[0].state_features)
+    for hidden_sizes in candidate_hidden_sizes:
+        model = PolicyValueMLP(
+            input_dim=input_dim,
+            hidden_sizes=hidden_sizes,
+            action_dim=4,
+        )
+        try:
+            load_checkpoint(checkpoint_path, model)
+        except Exception as exc:
+            print(
+                f"[manual] checkpoint load failed hidden_sizes={hidden_sizes} "
+                f"error={type(exc).__name__}: {exc}"
+            )
+            continue
+
+        model_bonus = build_model_bonus_fn(model, weight=model_bonus_weight)
+        print(
+            f"[manual] loaded checkpoint for suggestions: {checkpoint_path} "
+            f"hidden_sizes={hidden_sizes}"
+        )
+        return model_bonus, checkpoint_path
+
+    print("[manual] unable to load checkpoint; using heuristic-only suggestions.")
+    return None, checkpoint_path
+
 # ========================================
 # Application Entrypoint
 # ========================================
@@ -1349,54 +2403,52 @@ def main() -> int:
 
     player = pokeEnvPlayerInfo()
     mechanics = MechanicsAPI()
-    # run_battle(player, mechanics=mechanics, top_k=3, model=None, max_turns=100)
 
     # TRAINING CYCLE:
-    # Alright, after setting up automatic logging, the training battle loops, and everything else,
-    # This is how we run the full training cycle. 
-    # 1. If there are no logs, run heuristic training first to generate initial data
-    # 2. During the heuristic run, we log all the decisions and outcomes to a file.
-    # 3. Then we train the policy/value model on all accumulated logs.
-    # 4. After training, we run model-play collection for the configured decision budget.
-    # 5. After the cycle completes, we run eval to determine if the winrate is above the accenptable amount.
-    # 6. If the eval fails, stop the loop and change training config in train.py.
-    
+    # 1. If there are no logs, run heuristic training first to generate initial data.
+    # 2. During the heuristic run, log all decisions and outcomes.
+    # 3. Train the policy/value model on accumulated logs.
+    # 4. Run model-play collection for the configured decision budget.
+    # 5. Run evaluation and compare against target winrate.
+    '''
     training_report = run_training_cycle(
         TrainingLoopConfig(
             log_path="training/battle_logs.jsonl",
             artifact_dir="training/artifacts",
-            heuristic_decisions=20_000, # heuristic
+            heuristic_decisions=20_000,
             model_cycle_decisions=10_000,
-            eval_games=100,
+            eval_games=300,
             eval_min_win_rate=0.50,
+            model_bonus_weight=90.0,
+            model_hidden_sizes=(256, 128),
             max_cycles=1,
             collection_n_games=None,
+            train_config=TrainConfig(
+                epochs=15,
+                batch_size=64,
+                learning_rate=5e-4,
+                weight_decay=1e-4,
+                value_loss_weight=0.5,
+                device="cpu",
+                verbose=True,
+            ),
         ),
         player,
         mechanics,
     )
     print(f"Training status: {training_report['status']}")
+    '''
 
-
-    # RUN THIS IF TRAINING CYCLE GOT CUT OFF LAST TIME.
-    # checkpoint_path = _resolve_best_checkpoint_path("training/artifacts")
-    # evaluation = run_evaluation_games(
-    #     player,
-    #     mechanics=mechanics,
-    #     checkpoint_path=checkpoint_path,
-    #     log_path="training/battle_logs.jsonl",
-    #     artifact_dir="training/artifacts",
-    #     eval_games=100,
-    #     eval_threshold=0.50,
-    #     verbose=True,
-    #     eval_print_every_games=10,
-    # )
-    # print(
-    #     f"Eval result: wins={evaluation['wins']} losses={evaluation['losses']} "
-    #     f"ties={evaluation['ties']} win_rate={evaluation['win_rate']:.3f} "
-    #     f"gate={'pass' if evaluation['gate_passed'] else 'fail'}"
-    # )
-
+    # Manual runtime (leave commented while training loop is the active path):
+    run_battle(
+        player,
+        mechanics=mechanics,
+        top_k=3,
+        model=None,
+        max_turns=None,
+        wr_log_path="training/player_WR_log.jsonl",
+        user_timeout_seconds=60.0,
+    )
 
     return 0
 
