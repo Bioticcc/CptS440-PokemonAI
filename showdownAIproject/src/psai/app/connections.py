@@ -212,6 +212,48 @@ def _safe_requeue_ladder_search(
         return False
 
 
+def _maybe_requeue_on_idle(
+    player: Any,
+    *,
+    runner: AsyncConnectionRunner | None,
+    runner_started_at: float | None,
+    idle_requeue_attempts: int,
+    phase_label: str,
+    verbose: bool = False,
+    idle_threshold_seconds: float = 45.0,
+    force_after_attempts: int = 4,
+) -> tuple[float | None, int]:
+    if runner is None or runner.done:
+        return runner_started_at, idle_requeue_attempts
+
+    now = time.time()
+    started_at = float(runner_started_at) if runner_started_at is not None else now
+    idle_seconds = now - started_at
+    if idle_seconds < max(1.0, float(idle_threshold_seconds)):
+        return runner_started_at, idle_requeue_attempts
+
+    attempts = int(idle_requeue_attempts) + 1
+    force_recovery = attempts >= max(1, int(force_after_attempts))
+    if verbose:
+        print(
+            f"[{phase_label}] idle_without_battle for {idle_seconds:.1f}s; "
+            "attempting ladder requeue"
+        )
+        if force_recovery:
+            print(
+                f"[{phase_label}] prolonged idle detected "
+                f"(attempt={attempts}); forcing recovery"
+            )
+
+    _safe_requeue_ladder_search(
+        player,
+        phase_label=phase_label,
+        verbose=verbose,
+        force=force_recovery,
+    )
+    return time.time(), attempts
+
+
 def _safe_ensure_battle_timer_on(
     player: Any,
     battle_tag: str,
@@ -325,3 +367,108 @@ def _safe_cleanup_finished_battle(
 
     if verbose and phase_label:
         print(f"[{phase_label}] cleaned_up battle={normalized_tag}")
+
+
+def _launch_single_game(player: Any) -> AsyncConnectionRunner:
+    return AsyncConnectionRunner(player, 1).start()
+
+
+def _safe_wait_until_logged_in(player: Any, *, timeout_seconds: float = 30.0) -> bool:
+    ps_client = getattr(player, "ps_client", None)
+    logged_in_event = getattr(ps_client, "logged_in", None)
+    loop = getattr(ps_client, "loop", None)
+    if ps_client is None or logged_in_event is None or loop is None:
+        return False
+    if logged_in_event.is_set():
+        return True
+    try:
+        future = asyncio.run_coroutine_threadsafe(logged_in_event.wait(), loop)
+        future.result(timeout=max(1.0, timeout_seconds))
+        return True
+    except Exception:
+        return False
+
+
+def _safe_send_challenge(
+    player: Any,
+    opponent_name: str,
+    *,
+    phase_label: str = "manual",
+) -> bool:
+    opponent = str(opponent_name or "").strip()
+    if not opponent:
+        return False
+    if not _safe_wait_until_logged_in(player):
+        print(f"[{phase_label}] failed to confirm logged-in session before challenge.")
+        return False
+
+    ps_client = getattr(player, "ps_client", None)
+    loop = getattr(ps_client, "loop", None)
+    if ps_client is None or loop is None:
+        return False
+
+    packed_team = player.get_next_team() if hasattr(player, "get_next_team") else None
+    battle_format = str(
+        getattr(player, "format", "")
+        or getattr(player, "_configured_battle_format", "gen1randombattle")
+    )
+    try:
+        future = asyncio.run_coroutine_threadsafe(
+            ps_client.challenge(opponent, battle_format, packed_team),
+            loop,
+        )
+        future.result(timeout=10.0)
+        return True
+    except Exception as exc:
+        print(f"[{phase_label}] challenge_failed error={type(exc).__name__}: {exc}")
+        return False
+
+
+def _wait_for_active_battle(
+    player: Any,
+    *,
+    phase_label: str,
+    waiting_message: str,
+    runner: AsyncConnectionRunner | None = None,
+    allow_requeue: bool = False,
+    timeout_seconds: float = 180.0,
+    verbose: bool = True,
+) -> tuple[Any | None, AsyncConnectionRunner | None]:
+    wait_started_at = time.time()
+    runner_started_at = time.time()
+    idle_requeue_attempts = 0
+    last_wait_notice_at = 0.0
+
+    while True:
+        runner = _resolve_runner_state(
+            runner,
+            player=player,
+            phase_label=phase_label,
+            verbose=verbose,
+        )
+
+        battles = dict(getattr(player, "battles", {}) or {})
+        for battle in battles.values():
+            if not getattr(battle, "finished", False):
+                return battle, runner
+
+        now = time.time()
+        if verbose and (now - last_wait_notice_at >= 5.0):
+            elapsed = now - wait_started_at
+            print(f"[{phase_label}] {waiting_message} ({elapsed:.1f}s)")
+            last_wait_notice_at = now
+
+        if now - wait_started_at >= max(1.0, timeout_seconds):
+            return None, runner
+
+        if allow_requeue and runner is not None and not runner.done:
+            runner_started_at, idle_requeue_attempts = _maybe_requeue_on_idle(
+                player,
+                runner=runner,
+                runner_started_at=runner_started_at,
+                idle_requeue_attempts=idle_requeue_attempts,
+                phase_label=phase_label,
+                verbose=verbose,
+            )
+
+        time.sleep(0.2)

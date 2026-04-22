@@ -33,7 +33,7 @@ cd filePathTO/CptS440-PokemonAI
 git checkout main
 git status
 git add .
-git commit -m "first model complete, training second."
+git commit -m "Rerunning training, but with a fresh log file, to see if it improves performance."
 git push origin main
 git rev-parse --short HEAD
 
@@ -195,14 +195,22 @@ So our "pipeline" is as such:
     - Has 2 battle runners:
         - `run_battle(...)` = product/manual pipeline (state -> chooser -> human confirm -> send order)
         - `run_training_battle(..., source="heuristic"|"model")` = auto ladder collection for both phases (model bonus optional based on source)
+    - `run_battle(...)` manual turn menu now supports:
+        - `1. Attack`
+        - `2. Switch`
+        - `3. Forfeit` (requires typing `FORFEIT` to confirm)
+      and confirmed forfeits are logged as losses in `training/player_WR_log.jsonl`.
     - Training collection loop and JSONL logging are unified in `run_training_battle(...)`.
     - Active-battle loop includes timer enforcement and retry on stalled identical request signatures.
-    - `main()` currently runs the full training orchestrator (`run_training_cycle(...)`) with:
-        - `heuristic_decisions=20_000`
-        - `model_cycle_decisions=10_000`
-        - `eval_games=100`
-        - `max_cycles=1`
-      and prints `Training status: ...`.
+    - `run_evaluation_games(...)` is shared by both standalone eval and in-cycle eval.
+    - Champion/challenger promotion is now handled inside `run_evaluation_games(...)`:
+        - default rule: challenger must beat current champion by at least `+0.03` WR on at least `300` eval games,
+        - writes/updates `training/artifacts/best_model.json`,
+        - returns promotion metadata in evaluation payload (`champion_promoted`, reason, before/after champion checkpoint and WR).
+    - `main()` is intentionally toggle-based for workflow:
+        - use `run_training_cycle(...)` when collecting/training/evaluating models,
+        - use `run_battle(...)` for manual product play/testing.
+      Keep only one active at a time.
 
 - `src/psai/app/connections.py`
     - Owns `AsyncConnectionRunner` and network/recovery helpers (`_resolve_runner_state`, reconnect/requeue, finished-battle cleanup).
@@ -222,6 +230,7 @@ So our "pipeline" is as such:
         4. inline ladder evaluation,
         5. winrate gate stop/continue logic.
     - Eval stage now mirrors runtime recovery behavior (timer enforcement + stalled-request retry + guarded requeue).
+    - Best-model promotion is no longer duplicated in `run_training_cycle(...)`; it is centralized in `run_evaluation_games(...)` so standalone/in-cycle evals follow the same champion rule.
     - Saves per-cycle artifacts:
         - checkpoints: `training/artifacts/checkpoints/`
         - metrics: `training/artifacts/metrics/`
@@ -232,7 +241,9 @@ So our "pipeline" is as such:
     - Model bonus path is callable-based: `model(state, action) -> float`.
 
 - `src/psai/decision/search.py`
-    - Scores actions from `state.legal_actions` with depth-1 or depth-2 adjustment.
+    - `SearchConfig` now defaults to `depth=3` with `depth_decay=0.55`.
+    - Depth > 2 is now meaningful via discounted continuation adjustments (`depth3_adjustment`, `depth4_adjustment`, ...); previously >2 behaved like depth 2.
+    - Opponent-response adjustment now models expected response pressure (attack vs switch) while using existing `MechanicsAPI` outputs (`ActionOutcome`) only.
     - Uses non-switch actions first, with fallback to legal actions list if needed.
 
 - `src/psai/mechanics/api.py`
@@ -245,6 +256,7 @@ So our "pipeline" is as such:
     - Some parser detail helpers are still partial and should be completed/refined for stronger training quality.
 
 - Running modes in `main.py`:
-    - Product/manual usage: uncomment `run_battle(...)`.
-    - Full training loop usage: keep `run_training_cycle(...)` call uncommented.
+    - Product/manual usage: activate `run_battle(...)`.
+    - Full training loop usage: activate `run_training_cycle(...)`.
+    - Do not run both at once.
 # ----------------------------------------------

@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 import json
@@ -28,11 +27,14 @@ from poke_env.player import Player
 
 from psai.app.connections import (
     AsyncConnectionRunner,
+    _launch_single_game,
+    _maybe_requeue_on_idle,
     _resolve_runner_state,
     _safe_cleanup_finished_battle,
     _safe_ensure_battle_timer_on,
-    _safe_requeue_ladder_search,
     _safe_reset_battles,
+    _safe_send_challenge,
+    _wait_for_active_battle,
 )
 from psai.decision.chooser import ModelBonusFn, MoveSuggestion, choose_actions
 from psai.domain.state import State, parse_battle_to_state
@@ -748,67 +750,6 @@ def _prompt_user_choice_for_request(
         return chosen_order, chosen_action_id
 
 
-def _manual_wait_for_active_battle(
-    player: Any,
-    *,
-    phase_label: str,
-    waiting_message: str,
-    runner: AsyncConnectionRunner | None = None,
-    allow_requeue: bool = False,
-    timeout_seconds: float = 180.0,
-) -> tuple[Any | None, AsyncConnectionRunner | None]:
-    wait_started_at = time.time()
-    runner_started_at = time.time()
-    idle_requeue_attempts = 0
-    last_wait_notice_at = 0.0
-
-    while True:
-        runner = _resolve_runner_state(
-            runner,
-            player=player,
-            phase_label=phase_label,
-            verbose=True,
-        )
-
-        battles = dict(getattr(player, "battles", {}) or {})
-        for battle in battles.values():
-            if not getattr(battle, "finished", False):
-                return battle, runner
-
-        now = time.time()
-        if now - last_wait_notice_at >= 5.0:
-            elapsed = now - wait_started_at
-            print(f"[{phase_label}] {waiting_message} ({elapsed:.1f}s)")
-            last_wait_notice_at = now
-
-        if now - wait_started_at >= max(1.0, timeout_seconds):
-            return None, runner
-
-        if allow_requeue and runner is not None and not runner.done:
-            idle_seconds = now - runner_started_at
-            if idle_seconds >= 45.0:
-                idle_requeue_attempts += 1
-                force_recovery = idle_requeue_attempts >= 4
-                print(
-                    f"[{phase_label}] idle_without_battle for {idle_seconds:.1f}s; "
-                    "attempting ladder requeue"
-                )
-                if force_recovery:
-                    print(
-                        f"[{phase_label}] prolonged idle detected "
-                        f"(attempt={idle_requeue_attempts}); forcing recovery"
-                    )
-                _safe_requeue_ladder_search(
-                    player,
-                    phase_label=phase_label,
-                    verbose=True,
-                    force=force_recovery,
-                )
-                runner_started_at = time.time()
-
-        time.sleep(0.2)
-
-
 def _write_player_wr_log(
     path: Path,
     *,
@@ -889,54 +830,6 @@ def _print_outcome_banner(result: str) -> None:
         print(line)
 
 
-def _safe_wait_until_logged_in(player: Any, *, timeout_seconds: float = 30.0) -> bool:
-    ps_client = getattr(player, "ps_client", None)
-    logged_in_event = getattr(ps_client, "logged_in", None)
-    loop = getattr(ps_client, "loop", None)
-    if ps_client is None or logged_in_event is None or loop is None:
-        return False
-    if logged_in_event.is_set():
-        return True
-    try:
-        future = asyncio.run_coroutine_threadsafe(logged_in_event.wait(), loop)
-        future.result(timeout=max(1.0, timeout_seconds))
-        return True
-    except Exception:
-        return False
-
-
-def _safe_send_challenge(
-    player: Any,
-    opponent_name: str,
-    *,
-    phase_label: str = "manual",
-) -> bool:
-    opponent = str(opponent_name or "").strip()
-    if not opponent:
-        return False
-    if not _safe_wait_until_logged_in(player):
-        print(f"[{phase_label}] failed to confirm logged-in session before challenge.")
-        return False
-
-    ps_client = getattr(player, "ps_client", None)
-    loop = getattr(ps_client, "loop", None)
-    if ps_client is None or loop is None:
-        return False
-
-    packed_team = player.get_next_team() if hasattr(player, "get_next_team") else None
-    battle_format = str(getattr(player, "format", "") or getattr(player, "_configured_battle_format", "gen1randombattle"))
-    try:
-        future = asyncio.run_coroutine_threadsafe(
-            ps_client.challenge(opponent, battle_format, packed_team),
-            loop,
-        )
-        future.result(timeout=10.0)
-        return True
-    except Exception as exc:
-        print(f"[{phase_label}] challenge_failed error={type(exc).__name__}: {exc}")
-        return False
-
-
 def _run_manual_connected_battle(
     player: Any,
     *,
@@ -950,7 +843,7 @@ def _run_manual_connected_battle(
     max_turns: int | None = None,
     user_timeout_seconds: float = 60.0,
 ) -> None:
-    battle, runner = _manual_wait_for_active_battle(
+    battle, runner = _wait_for_active_battle(
         player,
         phase_label="manual",
         waiting_message=waiting_message,
@@ -1086,10 +979,6 @@ def _battle_outcome_value(battle: Any) -> tuple[float, str]:
     if won is False:
         return -1.0, "loss"
     return 0.0, "tie"
-
-
-def _launch_single_game(player: Any) -> AsyncConnectionRunner:
-    return AsyncConnectionRunner(player, 1).start()
 
 
 def _choice_object_id(choice: Any) -> str:
@@ -1590,28 +1479,14 @@ def run_training_battle(
                 print(f"[{phase_label}] launched ladder game #{battles_launched}")
 
         if runner is not None and not runner.done and not active_battles:
-            started_at = runner_started_at or time.time()
-            idle_seconds = time.time() - started_at
-            if idle_seconds >= 45.0:
-                idle_requeue_attempts += 1
-                force_recovery = idle_requeue_attempts >= 4
-                if verbose:
-                    print(
-                        f"[{phase_label}] idle_without_battle for {idle_seconds:.1f}s; "
-                        f"attempting ladder requeue"
-                    )
-                    if force_recovery:
-                        print(
-                            f"[{phase_label}] prolonged idle detected "
-                            f"(attempt={idle_requeue_attempts}); forcing recovery"
-                        )
-                _safe_requeue_ladder_search(
-                    player,
-                    phase_label=phase_label,
-                    verbose=verbose,
-                    force=force_recovery,
-                )
-                runner_started_at = time.time()
+            runner_started_at, idle_requeue_attempts = _maybe_requeue_on_idle(
+                player,
+                runner=runner,
+                runner_started_at=runner_started_at,
+                idle_requeue_attempts=idle_requeue_attempts,
+                phase_label=phase_label,
+                verbose=verbose,
+            )
 
         for battle in active_battles:
             battle_tag = str(getattr(battle, "battle_tag", id(battle)) or id(battle))
@@ -2044,35 +1919,21 @@ def run_evaluation_games(
         if active_battles:
             idle_requeue_attempts = 0
         if runner is None and not active_battles and games_launched < eval_games:
-            runner = AsyncConnectionRunner(player, 1).start()
+            runner = _launch_single_game(player)
             runner_started_at = time.time()
             games_launched += 1
             if verbose:
                 print(f"[eval] launched ladder game #{games_launched}/{eval_games}")
 
         if runner is not None and not runner.done and not active_battles:
-            started_at = runner_started_at or time.time()
-            idle_seconds = time.time() - started_at
-            if idle_seconds >= 45.0:
-                idle_requeue_attempts += 1
-                force_recovery = idle_requeue_attempts >= 4
-                if verbose:
-                    print(
-                        f"[eval] idle_without_battle for {idle_seconds:.1f}s; "
-                        f"attempting ladder requeue"
-                    )
-                    if force_recovery:
-                        print(
-                            f"[eval] prolonged idle detected "
-                            f"(attempt={idle_requeue_attempts}); forcing recovery"
-                        )
-                _safe_requeue_ladder_search(
-                    player,
-                    phase_label="eval",
-                    verbose=verbose,
-                    force=force_recovery,
-                )
-                runner_started_at = time.time()
+            runner_started_at, idle_requeue_attempts = _maybe_requeue_on_idle(
+                player,
+                runner=runner,
+                runner_started_at=runner_started_at,
+                idle_requeue_attempts=idle_requeue_attempts,
+                phase_label="eval",
+                verbose=verbose,
+            )
 
         for battle in active_battles:
             battle_tag = str(getattr(battle, "battle_tag", id(battle)) or id(battle))
@@ -2410,18 +2271,18 @@ def main() -> int:
     # 3. Train the policy/value model on accumulated logs.
     # 4. Run model-play collection for the configured decision budget.
     # 5. Run evaluation and compare against target winrate.
-    '''
+
     training_report = run_training_cycle(
         TrainingLoopConfig(
-            log_path="training/battle_logs.jsonl",
+            log_path="training/battle_logs_V2.jsonl",
             artifact_dir="training/artifacts",
-            heuristic_decisions=20_000,
-            model_cycle_decisions=10_000,
+            heuristic_decisions=20000,
+            model_cycle_decisions=10000,
             eval_games=300,
-            eval_min_win_rate=0.50,
+            eval_min_win_rate=0.30,
             model_bonus_weight=90.0,
             model_hidden_sizes=(256, 128),
-            max_cycles=1,
+            max_cycles=3,
             collection_n_games=None,
             train_config=TrainConfig(
                 epochs=15,
@@ -2437,10 +2298,11 @@ def main() -> int:
         mechanics,
     )
     print(f"Training status: {training_report['status']}")
-    '''
+    
 
     # Manual runtime (leave commented while training loop is the active path):
-    run_battle(
+    
+    '''run_battle(
         player,
         mechanics=mechanics,
         top_k=3,
@@ -2448,7 +2310,7 @@ def main() -> int:
         max_turns=None,
         wr_log_path="training/player_WR_log.jsonl",
         user_timeout_seconds=60.0,
-    )
+    )'''
 
     return 0
 
