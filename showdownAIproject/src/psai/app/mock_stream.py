@@ -14,16 +14,69 @@ from psai.mechanics.api import MechanicsAPI
 def make_mock_state(turn: int) -> State:
     
     # our team (just pikachu)
+    # --- [ OUR TEAM! ] ---
     pikachu = PokemonSnapshot(
         species="pikachu",
         hp_fraction=max(0.1, 1.0 - turn * 0.1), # simulate HP going down
         status=None,
         boosts={},
         types=("electric",),
-        known_moves=("thunderbolt", "quick_attack"),
+        known_moves=("thunderbolt", "quick_attack", "growl", "spark"),
+        fainted=False,
+    )
+    
+    bulbasaur = PokemonSnapshot(
+        species="bulbasaur",
+        hp_fraction=max(0.1, 1.0 - turn * 0.1), # simulate HP going down
+        status=None,
+        boosts={},
+        types=("grass",),
+        known_moves=("vine_whip"),
+        fainted=True,
+    )
+    
+    squirtle = PokemonSnapshot(
+        species="squirtle",
+        hp_fraction=max(0.1, 1.0 - turn * 0.1), # simulate HP going down
+        status="paralyzed",
+        boosts={},
+        types=("water",),
+        known_moves=("water_gun"),
+        fainted=False,
+    )
+    
+    charizard = PokemonSnapshot(
+        species="charizard",
+        hp_fraction=max(0.1, 1.0 - turn * 0.1), # simulate HP going down
+        status="burned",
+        boosts={},
+        types=("fire", "flying"),
+        known_moves=("flamethrower"),
+        fainted=False,
+    )
+    
+    pideotto = PokemonSnapshot(
+        species="pidgeotto",
+        hp_fraction=max(0.1, 1.0 - turn * 0.1), # simulate HP going down
+        status="asleep",
+        boosts={},
+        types=("normal", "flying"),
+        known_moves=("gust"),
         fainted=False,
     )
 
+    tauros = PokemonSnapshot(
+        species="tauros",
+        hp_fraction=max(0.1, 1.0 - turn * 0.1), # simulate HP going down
+        status=None,
+        boosts={},
+        types=("normal",),
+        known_moves=("tackle"),
+        fainted=False,
+    )
+    
+    # --- [ OPPONENT TEAM! ] ---
+    
     # opponent team (just charmander)
     charmander = PokemonSnapshot(
         species="charmander",
@@ -98,7 +151,7 @@ def make_mock_state(turn: int) -> State:
         turn_number=turn,
         friendly_active=pikachu,
         opponent_active=charmander,
-        friendly_team=(pikachu,),
+        friendly_team=(pikachu, bulbasaur, squirtle, charizard, pideotto, tauros),
         opponent_team=(charmander,),
         legal_actions=(thunderbolt, quick_attack, growl, spark),
         raw_battle=None,

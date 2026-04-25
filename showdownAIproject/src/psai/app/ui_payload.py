@@ -104,5 +104,7 @@ def _action_to_ui(state: State, mechanics: MechanicsAPI, action: LegalAction) ->
         "action_id": action.action_id,
         "move_name": action.move_name,
         "is_switch": action.is_switch,
+        "current_pp": action.current_pp,
+        "max_pp": action.max_pp,
         "outcome": _outcome_to_ui(outcome),
     }

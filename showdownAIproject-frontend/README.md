@@ -18,14 +18,27 @@ The frontend is currently a WIP! Currently, need to complete:
     - Or, do we want the Pokedex to minimize so it is side-by-side to the browser?
         - We can then have an option to hide decorative buttons if we minimize the screen enough.
 
+- CURRENTLY WORKING ON THIS!!
 - Lastly, will need to connect this all to the actual backend. Shouldn't take as long as designing frontend
     - Dynamic data is labeled with TODO in the App.jsx. Will just take some simple routing to fill in the gaps
 
-    - Using FastAPI: 
-        - Install using pip install fastapi uvicorn
-        - Run in terminal, side by side: 
-        PYTHONPATH=src python -m psai.app.mock_stream (this is sample info)
-        PYTHONPATH=src uvicorn psai.app.ui_server:app --reload (running the actual API server)
+
+# TO RUN AND TEST THE UI'S MOCK DATA
+Using FastAPI: 
+    - Install using pip install fastapi uvicorn
+    - Run in 3 different terminals, side by side: 
+
+    - Sample battle stream so we have info to read from and display
+    PYTHONPATH=src python -m psai.app.mock_stream 
+
+    - FastAPI backend servers (where frontend communicates to and requests the data from here - should see GET in terminal) 
+    PYTHONPATH=src uvicorn psai.app.ui_server:app --reload (running the actual API server)
+    - You can view the info on http://127.0.0.1:8000/state (or if your terminal gives a different address)
+
+    - Frontend Pokedex to see the info
+    cd showdownAIproject-frontend
+    npm run dev
+    - Then open up on localhost:5173 (or the address your terminal gives)
 
 # RELEVANT BACKEND FILES
 - psai/app/mock_stream.py
@@ -36,4 +49,4 @@ The frontend is currently a WIP! Currently, need to complete:
     - Payloads from backend end being sent over for frontend rendering
 
 - psai/app/ui_server.py
-    - FastAPI backend server for exposing the UI data to the frontend, with endpoints (state, steam)great
+    - FastAPI backend server for exposing the UI data to the frontend, with endpoints (state, steam)

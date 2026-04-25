@@ -9,7 +9,9 @@ import { useEffect, useState } from 'react'
 function App() {
   //  DYNAMIC DATA USE STATES
   const [battle, setBattle] = useState(null)
-  const [turn, setTurn] = useState(1)
+
+  // for switching pokemon, we need to know our current active pokemon and we hide it as an option
+  const activeSpecies = battle?.friendly?.active?.species;
 
   // live polling of the battle state so we can update the UI
   useEffect(() => {
@@ -69,17 +71,21 @@ function App() {
               <div className="screen-display">
 
                 {/* we'll have to add in stars, and the PP also */}
-                {/* <div className="move-grid">
-                  <div className="move-box">Move 1</div>
-                  <div className="move-box">Move 2</div>
-                  <div className="move-box">Move 3</div>
-                  <div className="move-box">Move 4</div>
-                  </div>
-                </div> */}
                 <div className="move-grid">
+
+                  {/* mapping our legal actions */}
                   {battle?.legal_actions?.map((move, i) => (
                     <div className="move-box" key={i}>
+
+                      {/* name of the move*/}
                       <div><b>{move.move_name}</b></div>
+
+                      {/* PP */}
+                      <div>PP: {move.current_pp ?? "?"}/{move.max_pp ?? "?"}</div>
+
+                      {/* TODO: stars to indicate the model rating */}
+                      <div>★</div>
+
                     </div>
                   ))}
                 </div>
@@ -96,8 +102,6 @@ function App() {
                   <div className="left-button-rectangle" style={{ backgroundColor: '#ff783d' }} />
                 </div>
 
-                {/* TODO: large select button. actually might change this, since user can already click directly on moves*/}
-                {/* maybe click that to switch to opponent view or something (display the known moves?) */}
                 <div className="select-button">Select</div>
 
                 {/* d-pad, just two rectangles */}
@@ -131,7 +135,7 @@ function App() {
                 <strong><u>Reasons:</u></strong> new status bonus: +80.00; move order: +75.00
               </p>
 
-              {/* TODO: opponent info (type, known moves, known switches) */}
+              {/* opponent info (type, known moves, known switches) */}
               <p className="right-text">
                 <span className="right-text-arrow">&#10148;</span>
                 <strong><u>Opponent:</u></strong> {battle?.opponent?.active?.species}
@@ -139,6 +143,7 @@ function App() {
               <ul className="right-sublist">
                 <li><strong>Type:</strong> {battle?.opponent?.active?.types?.join(', ')}</li>
                 <li><strong>Known Moves:</strong> {battle?.opponent?.active?.known_moves?.join(', ')}</li>
+                <li><strong>Known Switches:</strong> {battle?.opponent?.active?.known_switches?.join(', ')}</li>
               </ul>
 
             </div>
@@ -147,18 +152,35 @@ function App() {
             <div className="right-button-grid">
 
               {/* 1-5 is our other pokemon in our team */}
-              <button className="right-blue-button">1</button>
-              <button className="right-blue-button">2</button>
-              <button className="right-blue-button">3</button>
-              <button className="right-blue-button">4</button>
-              <button className="right-blue-button">5</button>
+              {/* map our pokemon, we'll ignore our current pokemon */}
+              {battle?.friendly?.team
+                ?.filter(pokemon => pokemon.species !== activeSpecies)
+                .slice(0, 5)
+                .map((pokemon, i) => (
+                  <button className="right-blue-button" key={i}>
+                    {pokemon.species}
+                  </button>
+              ))}
+
 
               {/* 6-10 can hold the stars of how good the switch is, and status of pokemon (fainted? sleep?) */}
-              <button className="right-blue-button">6</button>
-              <button className="right-blue-button">7</button>
-              <button className="right-blue-button">8</button>
-              <button className="right-blue-button">9</button>
-              <button className="right-blue-button">10</button>
+              {battle?.friendly?.team
+                ?.filter(pokemon => pokemon.species !== activeSpecies)
+                .map((pokemon, i) => (
+                  <button className="right-blue-button" key={i}>
+
+                    {/* status and info */}
+                    <span className="switch-status-text">
+                      {pokemon.fainted ? "fainted" : ""}
+                      {pokemon.status ? `${pokemon.status}` : ""}
+                      {!pokemon.fainted && !pokemon.status ? "healthy" : ""}
+                    
+                      {/* TODO: indicate star rating */}
+                      <div>★</div>
+                    </span>
+                  </button>
+              ))}
+
             </div>
 
             {/* more decorative buttons, separate by row */}
