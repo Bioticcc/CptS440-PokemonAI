@@ -1,4 +1,5 @@
 import './App.css'
+import { useEffect, useState } from 'react'
 
 // labeled dynamic data placeholders with TODO
 // note to self: fix resizing using clamp. OR, make the pokedex fill the whole screen.
@@ -6,6 +7,30 @@ import './App.css'
 // another option is to have the buttons hidden when we minimize
 
 function App() {
+  //  DYNAMIC DATA USE STATES
+  const [battle, setBattle] = useState(null)
+  const [turn, setTurn] = useState(1)
+
+  // live polling of the battle state so we can update the UI
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      try {
+        // accessing our API endpoint and loading the data
+        const res = await fetch("http://127.0.0.1:8000/state")
+        const data = await res.json()
+        setBattle(data)
+      } catch (err) {
+        console.error("Failed to fetch battle state:", err)
+      }
+    }, 1000) // polling every second
+
+    return () => clearInterval(interval)
+  }, [])
+
+  // placeholder loading state, can make it more fun later with a pokeball or something
+  // prevent rendering of the app before we have any data
+  if (!battle) return <div>Loading battle...</div>
+
   return (
     // main app shell
     <div className="app-shell">
@@ -43,50 +68,47 @@ function App() {
               {/* actual screen */}
               <div className="screen-display">
 
-                {/* TODO: WE WILL INSERT ACTUAL MOVES HERE! */}
                 {/* we'll have to add in stars, and the PP also */}
-                <div className="move-grid">
+                {/* <div className="move-grid">
                   <div className="move-box">Move 1</div>
                   <div className="move-box">Move 2</div>
                   <div className="move-box">Move 3</div>
                   <div className="move-box">Move 4</div>
+                  </div>
+                </div> */}
+                <div className="move-grid">
+                  {battle?.legal_actions?.map((move, i) => (
+                    <div className="move-box" key={i}>
+                      <div><b>{move.move_name}</b></div>
+                    </div>
+                  ))}
+                </div>
+
+              </div>
+
+              {/* onto the decorative buttons */}
+              {/* row below screen */}
+              <div className="left-buttons-row">
+                {/* circle, 2 rectangles, main rectangle */}
+                <div className="left-buttons-row-left">
+                  <div className="left-button-circle" />
+                  <div className="left-button-rectangle" style={{ backgroundColor: '#75ff53' }} />
+                  <div className="left-button-rectangle" style={{ backgroundColor: '#ff783d' }} />
+                </div>
+
+                {/* TODO: large select button. actually might change this, since user can already click directly on moves*/}
+                {/* maybe click that to switch to opponent view or something (display the known moves?) */}
+                <div className="select-button">Select</div>
+
+                {/* d-pad, just two rectangles */}
+                <div className="left-buttons-row-right">
+                  <div className="dpad">
+                    <div className="dpad-horizontal" />
+                    <div className="dpad-vertical" />
+                  </div>
                 </div>
               </div>
 
-              {/* row under screen ... honestly might remove if we want the screen to be bigger. we can comment out? */}
-              <div className="controls-row">
-                <div className="screen-dot" style={{ width: '30px', height: '30px' }} />
-                <div className="gray-lines">
-                  <div className="gray-line" />
-                  <div className="gray-line" />
-                  <div className="gray-line" />
-                  <div className="gray-line" />
-                </div>
-              </div>
-
-            </div>
-
-            {/* onto the decorative buttons */}
-            {/* row below screen */}
-            <div className="left-buttons-row">
-              {/* circle, 2 rectangles, main rectangle */}
-              <div className="left-buttons-row-left">
-                <div className="left-button-circle" />
-                <div className="left-button-rectangle" style={{ backgroundColor: '#75ff53' }} />
-                <div className="left-button-rectangle" style={{ backgroundColor: '#ff783d' }} />
-              </div>
-
-              {/* TODO: large select button. actually might change this, since user can already click directly on moves*/}
-              {/* maybe click that to switch to opponent view or something (display the known moves?) */}
-              <div className="select-button">Select</div>
-
-              {/* d-pad, just two rectangles */}
-              <div className="left-buttons-row-right">
-                <div className="dpad">
-                  <div className="dpad-horizontal" />
-                  <div className="dpad-vertical" />
-                </div>
-              </div>
             </div>
 
           </section>
@@ -112,12 +134,11 @@ function App() {
               {/* TODO: opponent info (type, known moves, known switches) */}
               <p className="right-text">
                 <span className="right-text-arrow">&#10148;</span>
-                <strong><u>Opponent:</u></strong> Ditto
+                <strong><u>Opponent:</u></strong> {battle?.opponent?.active?.species}
               </p>
               <ul className="right-sublist">
-                <li><strong>Type:</strong> Normal</li>
-                <li><strong>Known Moves:</strong> 1, 2, 3, 4</li>
-                <li><strong>Known Switches:</strong> 1, 2, 3, 4, 5</li>
+                <li><strong>Type:</strong> {battle?.opponent?.active?.types?.join(', ')}</li>
+                <li><strong>Known Moves:</strong> {battle?.opponent?.active?.known_moves?.join(', ')}</li>
               </ul>
 
             </div>
@@ -140,26 +161,26 @@ function App() {
               <button className="right-blue-button">10</button>
             </div>
 
-          {/* more decorative buttons, separate by row */}
-          {/* row 1 has two small retangles on the right */}
-          <div className="right-row-1">
-            <div className="right-mini-rectangle" />
-            <div className="right-mini-rectangle" />
-          </div>
-
-          {/* row 2 has one large gray button with a line between, and a circle */}
-          <div className="right-row-2">
-            <div className="right-gray-button">
-              <div className="right-gray-line" />
+            {/* more decorative buttons, separate by row */}
+            {/* row 1 has two small retangles on the right */}
+            <div className="right-row-1">
+              <div className="right-mini-rectangle" />
+              <div className="right-mini-rectangle" />
             </div>
-            <div className="right-circle" />
-          </div>
 
-          {/* row 3 has two big buttons */}
-          <div className="right-row-3">
-            <div className="right-large-rectangle" />
-            <div className="right-large-rectangle" />
-          </div>
+            {/* row 2 has one large gray button with a line between, and a circle */}
+            <div className="right-row-2">
+              <div className="right-gray-button">
+                <div className="right-gray-line" />
+              </div>
+              <div className="right-circle" />
+            </div>
+
+            {/* row 3 has two big buttons */}
+            <div className="right-row-3">
+              <div className="right-large-rectangle" />
+              <div className="right-large-rectangle" />
+            </div>
 
           </section>
 

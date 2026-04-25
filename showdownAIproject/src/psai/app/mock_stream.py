@@ -63,6 +63,34 @@ def make_mock_state(turn: int) -> State:
         is_switch=False,
         raw_move=None,
     )
+    
+    growl = LegalAction(
+        action_id="growl",
+        move_name="Growl",
+        move_type="normal",
+        base_power=0,
+        damage_class="status",
+        accuracy=1.0,
+        priority=0,
+        current_pp=40,
+        max_pp=40,
+        is_switch=False,
+        raw_move=None,
+    )
+    
+    spark = LegalAction(
+        action_id="spark",
+        move_name="Spark",
+        move_type="electric",
+        base_power=65,
+        damage_class="physical",
+        accuracy=1.0,
+        priority=0,
+        current_pp=20,
+        max_pp=20,
+        is_switch=False,
+        raw_move=None,
+    )
 
     # actual battle state!
     return State(
@@ -72,7 +100,7 @@ def make_mock_state(turn: int) -> State:
         opponent_active=charmander,
         friendly_team=(pikachu,),
         opponent_team=(charmander,),
-        legal_actions=(thunderbolt, quick_attack),
+        legal_actions=(thunderbolt, quick_attack, growl, spark),
         raw_battle=None,
     )
 
