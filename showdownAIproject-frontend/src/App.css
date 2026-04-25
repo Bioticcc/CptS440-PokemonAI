@@ -1,0 +1,418 @@
+/* ------------- [ BASIC SETUP STYLES ] ------------- */
+.app-shell {
+  min-height: 100svh;
+  display: flex;
+  padding: 20px;
+  box-sizing: border-box;
+  /* center vertically & horizontally */
+  align-items: center;
+  justify-content: center;
+}
+
+.pokedex-border {
+  width: min(920px, 100%);
+  aspect-ratio: 16 / 10;
+  border: 5px solid #c71e12;
+  border-radius: 4px;
+  background: #fb5f54;
+  padding: 14px;
+}
+
+.pokedex-inner {
+  height: 100%;
+  display: grid;
+  /* 1fr for left and right panel, 48 px for hinge */
+  grid-template-columns: 1fr 6% 1fr;
+  gap: 8px;
+}
+
+/* ------------- [ PANEL STYLES ] ------------- */
+.panel {
+  border: 5px solid #c71e12;
+  border-radius: 2px;
+}
+
+/* ------------- [ LEFT PANEL ] ------------- */
+.panel-left {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* -------- [ CIRCLES ] -------- */
+.circle-container {
+  padding: clamp(10px, 1.8vw, 15px);
+  display: flex;
+  gap: clamp(6px, 1vw, 10px);
+}
+
+.big-circle {
+  width: clamp(48px, 6vw, 75px);
+  height: clamp(48px, 6vw, 75px);
+  border: clamp(5px, 0.7vw, 8px) solid #ffffff;
+  background-color: #0df7f7;
+  border-radius: 100%;
+  box-shadow:
+    0 0 0 clamp(3px, 0.35vw, 4px) #c71e12,
+    /* red outline outside */
+    inset 0 0 0 clamp(3px, 0.35vw, 4px) #c71e12;
+  /* red outline inside  */
+  margin-right: clamp(3px, 0.6vw, 5px);
+}
+
+.small-circle {
+  width: clamp(16px, 2.4vw, 24px);
+  height: clamp(16px, 2.4vw, 24px);
+  border: clamp(3px, 0.4vw, 4px) solid #c71e12;
+  border-radius: 100%;
+}
+
+.curve-line {
+  width: 100%;
+  height: 50px;
+  display: block;
+  margin-top: -50px;
+  overflow: visible;
+}
+
+/* -------- [ SCREEN ] -------- */
+.screen-shell {
+  height: 100%;
+  border: 4px solid #6b6b6b;
+  border-radius: 16px;
+  margin: 12px 12px 2px;
+  padding: 6px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  background-color: #e6e6e6;
+}
+
+.screen-dots {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  padding: 5px;
+}
+
+.screen-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 2px solid #6b6b6b;
+  background: #c71e12;
+}
+
+/* -------- [ SCREEN DISPLAY ] -------- */
+.screen-display {
+  flex: 1;
+  border: 4px solid #6b6b6b;
+  border-radius: 8px;
+  background: #ffe7a8;
+  margin: 2px;
+  padding: 8px;
+  box-sizing: border-box;
+}
+
+.move-grid {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.move-box {
+  border: 3px solid #6b6b6b;
+  border-radius: 8px;
+  background: #f7e7b5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  color: #4b4b4b;
+}
+
+/* -------- [ DECORATIVE ROW ] -------- */
+.controls-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 3px 10px;
+  gap: 4px;
+}
+
+.gray-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.gray-line {
+  width: 50px;
+  height: 4px;
+  background: #4b4b4b;
+  border-radius: 2px;
+}
+
+/* -------- [ EXTRA BUTTONS! ] -------- */
+.left-buttons-row {
+  display: grid;
+  grid-template-columns: 7fr 3fr;
+  grid-template-rows: auto auto;
+  grid-template-areas:
+    "left dpad"
+    "select dpad";
+  column-gap: 2px;
+
+  /* spacing between screen + buttons */
+  padding-left: 10px;
+  padding-right: 10px;
+  margin-top: 5px;
+  margin-top: 5px;
+
+}
+
+/* this will hold circle button, two rectangle button, and main rectangle button */
+.left-buttons-row-left {
+  grid-area: left;
+  display: flex;
+  align-items: center;
+  /* horizontal */
+  justify-content: flex-start;
+}
+
+.left-button-circle {
+  width: 40px;
+  height: 40px;
+  border: 3px solid #4b4b4b;
+  border-radius: 100%;
+  background: #1966ff;
+  margin-left: 10px;
+}
+
+.left-button-rectangle {
+  width: 72px;
+  height: 15px;
+  border: 3px solid #a8150b;
+  border-radius: 15px;
+  margin-left: 10px;
+}
+
+.select-button {
+  width: 150px;
+  height: 50px;
+
+  border: 3px solid #292929;
+  border-radius: 10px;
+  background: #ffde64;
+  color: #292929;
+
+  margin-left: 55px;
+
+  /* fixing the text */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+}
+
+/* this will hold the d-pad */
+.left-buttons-row-right {
+  grid-area: dpad;
+  min-height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* slightly complicated. */
+.dpad {
+  width: 90px;
+  height: 90px;
+  position: relative;
+}
+
+.dpad-horizontal,
+.dpad-vertical {
+  position: absolute;
+  background: #2f2f2f;
+  border-radius: 6px;
+  border: 3px solid #1b1b1b;
+  box-sizing: border-box;
+}
+
+.dpad-horizontal {
+  width: 90px;
+  height: 30px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.dpad-vertical {
+  width: 30px;
+  height: 90px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+/* ------------- [ RIGHT PANEL ] ------------- */
+.panel-right {
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+}
+
+/* -------- [ RIGHT SCREEN ] -------- */
+.right-main-rectangle {
+  width: 100%;
+  height: 100%;
+  border: 4px solid #051916;
+  border-radius: 16px;
+  background: #1f654d;
+  box-sizing: border-box;
+  padding: 12px;
+  line-height: 1.35;
+  font-size: 22px;
+}
+
+.right-text {
+  text-align: left;
+  margin: 0;
+  color: #e5f7ec;
+  margin-bottom: 5px;
+}
+
+.right-text-arrow {
+  margin-right: 6px;
+  color: #d4ffe4;
+}
+
+.right-sublist {
+  text-align: left;
+  margin-top: 0px;
+  color: #dff4e8;
+  font-size: 18px;
+}
+
+/* right blue buttons to simulate switches, we want squares! */
+.right-button-grid {
+  margin-top: 10px; 
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 2px;
+}
+
+/* each button */
+.right-blue-button {
+  border: 3px solid #123a6b;
+  border-radius: 10px;
+  background: #2e8eff;
+  color: #e9f4ff;
+  font-size: 15px;
+  font-weight: 700;
+  height: 70px;
+}
+
+/* -------- [ MORE DECORATIVE BUTTONS! ] -------- */
+
+/* two small rectangles */
+.right-row-1 {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.right-mini-rectangle {
+  width: 60px;
+  height: 10px;
+  border: 3px solid #051916;
+  border-radius: 10px;
+  background: #1f654d;
+}
+
+/* one large gray button, and a circle */
+.right-row-2 {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  margin-top: 8px;
+}
+
+.right-gray-button {
+  position: relative;
+  width: 150px;
+  height: 50px;
+  border: 3px solid #4b4b4b;
+  border-radius: 8px;
+  background: #b9b9b9;
+}
+
+.right-gray-line {
+  /* fixing alignment. */
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  /* format */
+  width: 3px;
+  height: 100%;
+  background: #5a5a5a;
+}
+
+.right-circle {
+  width: 34px;
+  height: 34px;
+  border: 3px solid #6d5809;
+  border-radius: 50%;
+  background: #ffde64;
+}
+
+/* two big buttons */
+.right-row-3 {
+  display: flex;
+  width: 100%;
+  gap: 25px;
+  margin-top: 20px;
+}
+
+.right-large-rectangle {
+  flex: 1;
+  height: 45px;
+  border: 3px solid #051916;
+  border-radius: 6px;
+  background: #1f654d;
+}
+
+/* ------------- [ MIDDLE HINGE STYLES ] ------------- */
+.panel-hinge {
+  position: relative;
+}
+
+.hinge-line {
+  position: absolute;
+  height: 6px;
+  background: #c71e12;
+  width: 100%;
+}
+
+/* -------- [ we can hide items like this possibly! ] -------- */
+@media (max-width: 900px) {
+  /* left panel */
+  .circle-container,
+  .curve-line,
+  .controls-row,
+  .left-buttons-row,
+  /* right panel */
+  .right-button-grid,
+  .right-row-1,
+  .right-row-2,
+  .right-row-3
+  {
+    display: none;
+  }
+}
