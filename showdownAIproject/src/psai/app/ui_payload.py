@@ -1,3 +1,8 @@
+"""
+Converts State objects into frontend-ready JSON payloads for the UI renderer
+Takes PokemonSnapshot, LegalAction, and the mechanics engine
+"""
+
 from psai.domain.state import LegalAction, State
 from psai.mechanics.api import ActionOutcome, MechanicsAPI
 from typing import TypedDict, List, Optional

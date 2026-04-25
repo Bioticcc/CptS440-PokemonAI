@@ -1,3 +1,15 @@
+"""
+Mock battle-state generator for UI testing
+(UI payload structure testing, frontend rendering, streaming)
+
+Simulates a live battle state without requiring a real
+poke-env connection or trained agent
+"""
+
+# Plain-English summary:
+# This file replicates a fake live battle so we can test the UI and backend
+# without running the actual game engine or model
+
 import time
 import json
 

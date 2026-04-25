@@ -49,6 +49,9 @@ from psai.training.train import (
     run_training_cycle,
 )
 
+# UI helpers
+from psai.app.ui_bridge import update_state
+
 # ========================================
 # Guard Code for Abnormal Shoddown Requests (Like hyperbeam recharge)
 # ========================================
@@ -842,6 +845,7 @@ def _run_manual_connected_battle(
     wr_log_path: Path,
     max_turns: int | None = None,
     user_timeout_seconds: float = 60.0,
+    state_callback: Any = None,
 ) -> None:
     battle, runner = _wait_for_active_battle(
         player,
@@ -916,6 +920,10 @@ def _run_manual_connected_battle(
                 if state.legal_actions
                 else []
             )
+            
+            # using this state for ui payloads
+            if state_callback is not None:
+                state_callback(state)
 
             print(_render_ascii_battle_view(state, battle))
             _print_ranked_suggestions_short(turn_suggestions, top_k=top_k)
@@ -1264,6 +1272,7 @@ def run_battle(
     runtime_artifact_dir: str | Path = "training/artifacts",
     runtime_model_bonus_weight: float = 90.0,
     runtime_default_hidden_sizes: tuple[int, ...] = (256, 128),
+    state_callback: Any = None, # to expose state info to the UI , through run_manual_connected_battle (more details of battle)
 ) -> None:
     # Manual product mode menu:
     # 1) Ladder game
@@ -1308,6 +1317,7 @@ def run_battle(
                 wr_log_path=wr_log,
                 max_turns=max_turns,
                 user_timeout_seconds=user_timeout_seconds,
+                state_callback=state_callback,
             )
             continue
 
@@ -1332,6 +1342,7 @@ def run_battle(
                 wr_log_path=wr_log,
                 max_turns=max_turns,
                 user_timeout_seconds=user_timeout_seconds,
+                state_callback=state_callback,
             )
             continue
 
@@ -2302,6 +2313,10 @@ def main() -> int:
 
     # Manual runtime (leave commented while training loop is the active path):
     
+    # state_callback = update_state is where we connect the battle loop to the UI
+    # each turn, the latest State should be passed into update_state, stored in the UI bridge
+    # then the FastAPI /state endpoint will read that latest state and bring the info over to the UI
+    
     '''run_battle(
         player,
         mechanics=mechanics,
@@ -2310,6 +2325,7 @@ def main() -> int:
         max_turns=None,
         wr_log_path="training/player_WR_log.jsonl",
         user_timeout_seconds=60.0,
+        state_callback = update_state
     )'''
 
     return 0
