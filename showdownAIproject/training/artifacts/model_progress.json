@@ -1,0 +1,136 @@
+{
+  "latest": {
+    "checkpoint_path": "/home/kyle/Desktop/Adam/CptS440-PokemonAI/showdownAIproject/training/artifacts/checkpoints/policy_value_cycle_0001_run_0006.pt",
+    "modelname": "PokeLearn_20260420",
+    "models_evaluation_stats": {
+      "Eval Threshold": 50.0,
+      "Loss": 211,
+      "Passed/Failed": "Failed",
+      "Ties": 2,
+      "WR%": 29.0,
+      "Wins": 87
+    },
+    "training_config": {
+      "batch_size": 64,
+      "checkpoint_path": "training/artifacts/checkpoints/policy_value_cycle_0001_run_0006.pt",
+      "device": "cpu",
+      "epochs": 15,
+      "learning_rate": 0.0005,
+      "value_loss_weight": 0.5,
+      "verbose": true,
+      "weight_decay": 0.0001
+    }
+  },
+  "models": [
+    {
+      "checkpoint_path": "/home/kyle/Desktop/Adam/CptS440-PokemonAI/showdownAIproject/training/artifacts/checkpoints/policy_value_cycle_0001.pt",
+      "modelname": "PokeLearn_20260413",
+      "models_evaluation_stats": {
+        "Eval Threshold": 50.0,
+        "Loss": 66,
+        "Passed/Failed": "Failed",
+        "Ties": 0,
+        "WR%": 34.0,
+        "Wins": 34
+      },
+      "training_config": {
+        "batch_size": 32,
+        "checkpoint_path": "/home/kyle/Desktop/Adam/CptS440-PokemonAI/showdownAIproject/training/artifacts/checkpoints/policy_value_cycle_0001.pt",
+        "device": "cpu",
+        "epochs": 5,
+        "learning_rate": 0.001,
+        "value_loss_weight": 1.0,
+        "verbose": true,
+        "weight_decay": 0.0
+      }
+    },
+    {
+      "checkpoint_path": "/home/kyle/Desktop/Adam/CptS440-PokemonAI/showdownAIproject/training/artifacts/checkpoints/policy_value_cycle_0001_run_0002.pt",
+      "modelname": "PokeLearn_20260417",
+      "models_evaluation_stats": {
+        "Eval Threshold": 50.0,
+        "Loss": 84,
+        "Passed/Failed": "Failed",
+        "Ties": 0,
+        "WR%": 16.0,
+        "Wins": 16
+      },
+      "training_config": {
+        "batch_size": 64,
+        "checkpoint_path": "training/artifacts/checkpoints/policy_value_cycle_0001_run_0002.pt",
+        "device": "cpu",
+        "epochs": 15,
+        "learning_rate": 0.0005,
+        "value_loss_weight": 0.5,
+        "verbose": true,
+        "weight_decay": 0.0001
+      }
+    },
+    {
+      "checkpoint_path": "/home/kyle/Desktop/Adam/CptS440-PokemonAI/showdownAIproject/training/artifacts/checkpoints/policy_value_cycle_0001_run_0003.pt",
+      "modelname": "PokeLearn_20260419",
+      "models_evaluation_stats": {
+        "Eval Threshold": 50.0,
+        "Loss": 77,
+        "Passed/Failed": "Failed",
+        "Ties": 0,
+        "WR%": 23.0,
+        "Wins": 23
+      },
+      "training_config": {
+        "batch_size": 64,
+        "checkpoint_path": "training/artifacts/checkpoints/policy_value_cycle_0001_run_0003.pt",
+        "device": "cpu",
+        "epochs": 15,
+        "learning_rate": 0.0005,
+        "value_loss_weight": 0.5,
+        "verbose": true,
+        "weight_decay": 0.0001
+      }
+    },
+    {
+      "checkpoint_path": "/home/kyle/Desktop/Adam/CptS440-PokemonAI/showdownAIproject/training/artifacts/checkpoints/policy_value_cycle_0001_run_0004.pt",
+      "modelname": "PokeLearn_20260419",
+      "models_evaluation_stats": {
+        "Eval Threshold": 50.0,
+        "Loss": 82,
+        "Passed/Failed": "Failed",
+        "Ties": 0,
+        "WR%": 18.0,
+        "Wins": 18
+      },
+      "training_config": {
+        "batch_size": 32,
+        "checkpoint_path": "training/artifacts/checkpoints/policy_value_cycle_0001_run_0004.pt",
+        "device": "cpu",
+        "epochs": 5,
+        "learning_rate": 0.001,
+        "value_loss_weight": 1.0,
+        "verbose": true,
+        "weight_decay": 0.0
+      }
+    },
+    {
+      "checkpoint_path": "/home/kyle/Desktop/Adam/CptS440-PokemonAI/showdownAIproject/training/artifacts/checkpoints/policy_value_cycle_0001_run_0006.pt",
+      "modelname": "PokeLearn_20260420",
+      "models_evaluation_stats": {
+        "Eval Threshold": 50.0,
+        "Loss": 211,
+        "Passed/Failed": "Failed",
+        "Ties": 2,
+        "WR%": 29.0,
+        "Wins": 87
+      },
+      "training_config": {
+        "batch_size": 64,
+        "checkpoint_path": "training/artifacts/checkpoints/policy_value_cycle_0001_run_0006.pt",
+        "device": "cpu",
+        "epochs": 15,
+        "learning_rate": 0.0005,
+        "value_loss_weight": 0.5,
+        "verbose": true,
+        "weight_decay": 0.0001
+      }
+    }
+  ]
+}

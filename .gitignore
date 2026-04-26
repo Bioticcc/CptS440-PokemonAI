@@ -13,7 +13,3 @@ showdownAIproject/.venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-
-# Training runtime artifacts
-showdownAIproject/training/artifacts/
-showdownAIproject/training/*.jsonl
