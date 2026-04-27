@@ -18,6 +18,14 @@ function App() {
   // for switching pokemon, we need to know our current active pokemon and we hide it as an option
   const activeSpecies = battle?.friendly?.active?.species;
 
+  // for reasons and move suggestions
+  // here we'll just get the best moves in order and map the num of stars
+  const rankedMoves = [...(battle?.legal_actions ?? [])]
+    .sort((a, b) => b.score - a.score)
+
+  const [selectedMove, setSelectedMove] = useState(null)
+  const gridMoves = battle?.legal_actions ?? []  
+
   // live polling of battle state + runtime prompts
   useEffect(() => {
     let mounted = true
@@ -201,9 +209,20 @@ function App() {
                 {/* we'll have to add in stars, and the PP also */}
                 <div className="move-grid">
 
-                  {/* mapping our legal actions */}
-                  {battle?.legal_actions?.map((move, i) => (
-                    <div className="move-box" key={i}>
+                  {/* mapping our legal actions - a user will select a move and reasons show on the right later */}
+                  {gridMoves.map((move, i) => (
+                    <div
+                      key={move.action_id}
+                      className="move-box"
+                      onClick={() => { setSelectedMove(move.action_id) }}
+                      style={{
+                        cursor: 'pointer',
+                        border: 
+                        selectedMove === move.action_id
+                          ? "3px solid #17f944"
+                          : "3px solid #333333"
+                      }}
+                    >
 
                       {/* name of the move*/}
                       <div><b>{move.move_name}</b></div>
@@ -211,8 +230,12 @@ function App() {
                       {/* PP */}
                       <div>PP: {move.current_pp ?? "?"}/{move.max_pp ?? "?"}</div>
 
-                      {/* TODO: stars to indicate the model rating */}
-                      <div>★</div>
+                      {/* stars to indicate the model rating */}
+                      <div>
+                        {move.rank === 1 && "★★★"}
+                        {move.rank === 2 && "★★"}
+                        {move.rank === 3 && "★"}
+                      </div>
 
                     </div>
                   ))}
@@ -288,7 +311,7 @@ function App() {
                   <button className="right-blue-button" key={i}>
                     {pokemon.species}
                   </button>
-              ))}
+                ))}
 
 
               {/* 6-10 can hold the stars of how good the switch is, and status of pokemon (fainted? sleep?) */}
@@ -302,12 +325,12 @@ function App() {
                       {pokemon.fainted ? "fainted" : ""}
                       {pokemon.status ? `${pokemon.status}` : ""}
                       {!pokemon.fainted && !pokemon.status ? "healthy" : ""}
-                    
+
                       {/* TODO: indicate star rating */}
-                      <div>★</div>
+                      {/* <div>★</div> */}
                     </span>
                   </button>
-              ))}
+                ))}
 
             </div>
 

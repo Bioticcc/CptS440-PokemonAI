@@ -189,7 +189,7 @@
 }
 
 .move-box {
-  border: 3px solid #6b6b6b;
+  /* border: 3px solid #6b6b6b; */
   border-radius: 8px;
   background: #f7e7b5;
   display: flex;
