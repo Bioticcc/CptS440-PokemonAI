@@ -1,0 +1,100 @@
+{
+  "checkpoint_path": "training/artifacts/checkpoints/policy_value_cycle_0001_run_0006.pt",
+  "cycle_id": 1,
+  "evaluation": {
+    "champion_checkpoint_after": "/home/kyle/Desktop/Adam/CptS440-PokemonAI/showdownAIproject/training/artifacts/checkpoints/policy_value_cycle_0001_run_0006.pt",
+    "champion_checkpoint_before": null,
+    "champion_min_delta": 0.03,
+    "champion_min_games": 300,
+    "champion_promoted": true,
+    "champion_win_rate_after": 0.29,
+    "champion_win_rate_before": null,
+    "eval_threshold": 0.5,
+    "games": 300,
+    "gate_passed": false,
+    "losses": 211,
+    "modelname": "PokeLearn_20260420",
+    "promotion_reason": "no_existing_champion",
+    "ties": 2,
+    "win_rate": 0.29,
+    "wins": 87
+  },
+  "gate_passed": false,
+  "model_collection": {
+    "battles_finished": 330,
+    "battles_launched": 329,
+    "cycle_id": 1,
+    "decision_budget": 10000,
+    "decisions_collected": 10000,
+    "decisions_played": 10010,
+    "source": "model"
+  },
+  "records_used": 59480,
+  "train_config": {
+    "batch_size": 64,
+    "checkpoint_path": "training/artifacts/checkpoints/policy_value_cycle_0001_run_0006.pt",
+    "device": "cpu",
+    "epochs": 15,
+    "learning_rate": 0.0005,
+    "value_loss_weight": 0.5,
+    "verbose": true,
+    "weight_decay": 0.0001
+  },
+  "train_result": {
+    "epochs": 15,
+    "metrics": {
+      "policy_loss": [
+        1.2506596362718971,
+        1.22011236311287,
+        1.2043021834024819,
+        1.1959475890282663,
+        1.1934491295968332,
+        1.1915502221353593,
+        1.1908772354484887,
+        1.189207629106378,
+        1.1885055660560566,
+        1.188776102886405,
+        1.1880036454046927,
+        1.1866693821645553,
+        1.186693867560356,
+        1.1852953206467371,
+        1.1853889979982888
+      ],
+      "total_loss": [
+        1.5912004904080463,
+        1.5419786596810945,
+        1.516112901703004,
+        1.5010547126493146,
+        1.4934921667140018,
+        1.4891978006209097,
+        1.4866713168800518,
+        1.4837403488415544,
+        1.4824489225623427,
+        1.48144759567835,
+        1.480336437174069,
+        1.478287293577707,
+        1.4773485369579766,
+        1.4770585580538678,
+        1.4751546636704476
+      ],
+      "value_loss": [
+        0.6810817081120706,
+        0.6437325944823603,
+        0.6236214349026321,
+        0.6102142441336826,
+        0.6000860741061549,
+        0.5952951575799655,
+        0.5915881629592629,
+        0.589065436906712,
+        0.5878867118909795,
+        0.5853429845904792,
+        0.5846655840034126,
+        0.5832358219290292,
+        0.5813093388593326,
+        0.5835264751988073,
+        0.5795313309597713
+      ]
+    },
+    "num_records": 59480
+  }
+}

@@ -2547,7 +2547,7 @@ def main() -> int:
             log_path="training/battle_logs_V2.jsonl",
             artifact_dir="training/artifacts",
             heuristic_decisions=20000,
-            model_cycle_decisions=10000,
+            model_cycle_decisions=0,
             eval_games=300,
             eval_min_win_rate=0.30,
             model_bonus_weight=90.0,
