@@ -1,5 +1,6 @@
 import './App.css'
 import { useEffect, useState } from 'react'
+import { fetchBattleState, fetchPrompt, submitPromptResponse } from './uiBridgeApi'
 
 // labeled dynamic data placeholders with TODO
 // note to self: fix resizing using clamp. OR, make the pokedex fill the whole screen.
@@ -9,25 +10,97 @@ import { useEffect, useState } from 'react'
 function App() {
   //  DYNAMIC DATA USE STATES
   const [battle, setBattle] = useState(null)
+  const [prompt, setPrompt] = useState(null)
+  const [promptError, setPromptError] = useState('')
+  const [challengeName, setChallengeName] = useState('')
+  const [isSubmittingPrompt, setIsSubmittingPrompt] = useState(false)
 
   // for switching pokemon, we need to know our current active pokemon and we hide it as an option
   const activeSpecies = battle?.friendly?.active?.species;
 
-  // live polling of the battle state so we can update the UI
+  // live polling of battle state + runtime prompts
   useEffect(() => {
-    const interval = setInterval(async () => {
-      try {
-        // accessing our API endpoint and loading the data
-        const res = await fetch("http://127.0.0.1:8000/state")
-        const data = await res.json()
-        setBattle(data)
-      } catch (err) {
-        console.error("Failed to fetch battle state:", err)
-      }
-    }, 1000) // polling every second
+    let mounted = true
 
-    return () => clearInterval(interval)
+    const tick = async () => {
+      try {
+        const [battleState, promptPayload] = await Promise.all([
+          fetchBattleState(),
+          fetchPrompt(),
+        ])
+        if (!mounted) {
+          return
+        }
+        setBattle(battleState)
+        const nextPrompt = promptPayload?.prompt ?? null
+        setPrompt(nextPrompt)
+        if (nextPrompt?.kind !== 'challenge_username') {
+          setChallengeName('')
+        }
+      } catch (err) {
+        if (!mounted) {
+          return
+        }
+        console.error("Failed to fetch runtime UI state:", err)
+      }
+    }
+
+    tick()
+    const interval = setInterval(tick, 1000) // polling every second
+
+    return () => {
+      mounted = false
+      clearInterval(interval)
+    }
   }, [])
+
+  async function submitChoice(choiceId) {
+    if (!prompt) {
+      return
+    }
+
+    setIsSubmittingPrompt(true)
+    setPromptError('')
+    try {
+      await submitPromptResponse({
+        prompt_id: prompt.prompt_id,
+        choice_id: String(choiceId),
+      })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setPromptError(message)
+    } finally {
+      setIsSubmittingPrompt(false)
+    }
+  }
+
+  async function submitChallengeName(event) {
+    event.preventDefault()
+    if (!prompt) {
+      return
+    }
+
+    const value = challengeName.trim()
+    if (!value) {
+      setPromptError('Enter a username before submitting.')
+      return
+    }
+
+    setIsSubmittingPrompt(true)
+    setPromptError('')
+    try {
+      await submitPromptResponse({
+        prompt_id: prompt.prompt_id,
+        value,
+      })
+      setChallengeName('')
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setPromptError(message)
+    } finally {
+      setIsSubmittingPrompt(false)
+    }
+  }
 
   // placeholder loading state, can make it more fun later with a pokeball or something
   // prevent rendering of the app before we have any data
@@ -36,6 +109,61 @@ function App() {
   return (
     // main app shell
     <div className="app-shell">
+      {prompt && (
+        <section className="runtime-menu-card">
+          <div className="runtime-menu-title">Runtime Menu</div>
+          <div className="runtime-menu-message">{prompt.message}</div>
+
+          {prompt.kind === 'main_menu' && (
+            <div className="runtime-menu-options">
+              <button className="runtime-menu-button" onClick={() => submitChoice('1')} disabled={isSubmittingPrompt}>
+                1. Connect to ladder
+              </button>
+              <button className="runtime-menu-button" onClick={() => submitChoice('2')} disabled={isSubmittingPrompt}>
+                2. Challenge a player
+              </button>
+              <button className="runtime-menu-button" onClick={() => submitChoice('3')} disabled={isSubmittingPrompt}>
+                3. View all-time winrate
+              </button>
+              <button className="runtime-menu-button" onClick={() => submitChoice('4')} disabled={isSubmittingPrompt}>
+                4. Quit
+              </button>
+            </div>
+          )}
+
+          {prompt.kind === 'challenge_username' && (
+            <form className="runtime-menu-form" onSubmit={submitChallengeName}>
+              <input
+                className="runtime-menu-input"
+                placeholder="Showdown username"
+                value={challengeName}
+                onChange={(event) => setChallengeName(event.target.value)}
+                disabled={isSubmittingPrompt}
+              />
+              <button className="runtime-menu-button" type="submit" disabled={isSubmittingPrompt}>
+                Send Challenge
+              </button>
+            </form>
+          )}
+
+          {prompt.kind !== 'main_menu' && prompt.kind !== 'challenge_username' && (
+            <div className="runtime-menu-options">
+              {(prompt.options || []).map((option) => (
+                <button
+                  key={option.id}
+                  className="runtime-menu-button"
+                  onClick={() => submitChoice(option.id)}
+                  disabled={isSubmittingPrompt}
+                >
+                  {option.label || option.id}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {promptError && <div className="runtime-menu-error">{promptError}</div>}
+        </section>
+      )}
 
       {/* border to hold all coontent */}
       <div className="pokedex-border">

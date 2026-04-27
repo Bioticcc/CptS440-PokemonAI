@@ -2,11 +2,75 @@
 .app-shell {
   min-height: 100svh;
   display: flex;
+  flex-direction: column;
+  gap: 12px;
   padding: 20px;
   box-sizing: border-box;
   /* center vertically & horizontally */
   align-items: center;
   justify-content: center;
+}
+
+.runtime-menu-card {
+  width: min(920px, 100%);
+  border: 3px solid #2f2f2f;
+  border-radius: 8px;
+  background: #f2e8b2;
+  padding: 10px 12px;
+  box-sizing: border-box;
+}
+
+.runtime-menu-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: #292929;
+}
+
+.runtime-menu-message {
+  margin-top: 4px;
+  color: #292929;
+}
+
+.runtime-menu-options {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.runtime-menu-button {
+  border: 2px solid #2f2f2f;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #ffd452;
+  color: #262626;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.runtime-menu-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.runtime-menu-form {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+}
+
+.runtime-menu-input {
+  flex: 1;
+  border: 2px solid #2f2f2f;
+  border-radius: 8px;
+  padding: 8px;
+  font-size: 14px;
+}
+
+.runtime-menu-error {
+  margin-top: 8px;
+  color: #9a1313;
+  font-size: 13px;
 }
 
 .pokedex-border {
