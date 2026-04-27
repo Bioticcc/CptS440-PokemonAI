@@ -1,18 +1,18 @@
 {
   "latest": {
-    "checkpoint_path": "/home/kyle/Desktop/Adam/CptS440-PokemonAI/showdownAIproject/training/artifacts/checkpoints/policy_value_cycle_0001_run_0006.pt",
-    "modelname": "PokeLearn_20260420",
+    "checkpoint_path": "/home/kyle/Desktop/Adam/CptS440-PokemonAI/showdownAIproject/training/artifacts/checkpoints/policy_value_cycle_0001_run_0010.pt",
+    "modelname": "PokeLearn_20260426",
     "models_evaluation_stats": {
-      "Eval Threshold": 50.0,
-      "Loss": 211,
+      "Eval Threshold": 30.0,
+      "Loss": 227,
       "Passed/Failed": "Failed",
-      "Ties": 2,
-      "WR%": 29.0,
-      "Wins": 87
+      "Ties": 3,
+      "WR%": 23.33,
+      "Wins": 70
     },
     "training_config": {
       "batch_size": 64,
-      "checkpoint_path": "training/artifacts/checkpoints/policy_value_cycle_0001_run_0006.pt",
+      "checkpoint_path": "training/artifacts/checkpoints/policy_value_cycle_0001_run_0010.pt",
       "device": "cpu",
       "epochs": 15,
       "learning_rate": 0.0005,
@@ -124,6 +124,28 @@
       "training_config": {
         "batch_size": 64,
         "checkpoint_path": "training/artifacts/checkpoints/policy_value_cycle_0001_run_0006.pt",
+        "device": "cpu",
+        "epochs": 15,
+        "learning_rate": 0.0005,
+        "value_loss_weight": 0.5,
+        "verbose": true,
+        "weight_decay": 0.0001
+      }
+    },
+    {
+      "checkpoint_path": "/home/kyle/Desktop/Adam/CptS440-PokemonAI/showdownAIproject/training/artifacts/checkpoints/policy_value_cycle_0001_run_0010.pt",
+      "modelname": "PokeLearn_20260426",
+      "models_evaluation_stats": {
+        "Eval Threshold": 30.0,
+        "Loss": 227,
+        "Passed/Failed": "Failed",
+        "Ties": 3,
+        "WR%": 23.33,
+        "Wins": 70
+      },
+      "training_config": {
+        "batch_size": 64,
+        "checkpoint_path": "training/artifacts/checkpoints/policy_value_cycle_0001_run_0010.pt",
         "device": "cpu",
         "epochs": 15,
         "learning_rate": 0.0005,

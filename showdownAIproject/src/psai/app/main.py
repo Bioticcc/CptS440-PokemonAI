@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import select
+import shutil
 import subprocess
 import sys
 import threading
@@ -63,6 +64,45 @@ from psai.app.ui_bridge import update_state
 
 _ORIGINAL_AVAILABLE_MOVES_FROM_REQUEST = Pokemon.available_moves_from_request
 _ORIGINAL_UPDATE_TEAM_FROM_REQUEST = AbstractBattle._update_team_from_request
+_CURRENT_CHAMPION_FILENAME = "current_champion.pt"
+
+
+def _current_champion_path(artifact_root: Path) -> Path:
+    return artifact_root / "checkpoints" / _CURRENT_CHAMPION_FILENAME
+
+
+def _promote_checkpoint_to_current_champion(
+    *,
+    challenger_checkpoint: Path,
+    artifact_root: Path,
+    verbose: bool = False,
+) -> Path:
+    challenger_resolved = Path(challenger_checkpoint).resolve()
+    if not challenger_resolved.exists():
+        raise FileNotFoundError(f"Challenger checkpoint does not exist: {challenger_resolved}")
+
+    champion_path = _current_champion_path(Path(artifact_root))
+    champion_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if champion_path.exists():
+        try:
+            if champion_path.resolve() == challenger_resolved:
+                return champion_path.resolve()
+        except Exception:
+            pass
+
+    tmp_path = champion_path.with_suffix(champion_path.suffix + ".tmp")
+    if tmp_path.exists():
+        tmp_path.unlink()
+    shutil.copy2(challenger_resolved, tmp_path)
+    tmp_path.replace(champion_path)
+
+    if verbose:
+        print(
+            f"[eval] champion alias updated {challenger_resolved.name} -> "
+            f"{champion_path}"
+        )
+    return champion_path.resolve()
 
 
 def _request_move_ids_from_request(request: dict[str, Any] | None) -> tuple[str, ...]:
@@ -2227,10 +2267,16 @@ def run_evaluation_games(
     champion_win_rate_after = champion_win_rate_before
 
     if champion_promoted:
-        champion_checkpoint_after = challenger_checkpoint
+        champion_alias_path = _promote_checkpoint_to_current_champion(
+            challenger_checkpoint=resolved_checkpoint_path,
+            artifact_root=artifact_root,
+            verbose=verbose,
+        )
+        champion_checkpoint_after = str(champion_alias_path)
         champion_win_rate_after = challenger_win_rate
         best_pointer_payload = {
-            "checkpoint_path": challenger_checkpoint,
+            "checkpoint_path": champion_checkpoint_after,
+            "source_checkpoint_path": challenger_checkpoint,
             "win_rate": challenger_win_rate,
             "games": int(evaluation["games"]),
             "promoted_at_utc": datetime.utcnow().isoformat() + "Z",
@@ -2244,7 +2290,7 @@ def run_evaluation_games(
             json.dump(best_pointer_payload, handle, indent=2, sort_keys=True)
         if verbose:
             print(
-                f"[eval] champion_promoted checkpoint={challenger_checkpoint} "
+                f"[eval] champion_promoted checkpoint={champion_checkpoint_after} "
                 f"win_rate={challenger_win_rate:.3f}"
             )
     elif verbose:
@@ -2278,16 +2324,20 @@ def run_evaluation_games(
 def _resolve_best_checkpoint_path(artifact_dir: str | Path = "training/artifacts") -> Path:
     artifact_root = Path(artifact_dir)
     best_pointer_path = artifact_root / "best_model.json"
+    champion_alias_path = _current_champion_path(artifact_root)
 
     checkpoint_path: Path | None = None
+    if champion_alias_path.exists():
+        checkpoint_path = champion_alias_path
+
     if best_pointer_path.exists():
         try:
             best_payload = dict(json.loads(best_pointer_path.read_text(encoding="utf-8")))
             checkpoint_value = str(best_payload.get("checkpoint_path", "")).strip()
-            if checkpoint_value:
+            if checkpoint_value and checkpoint_path is None:
                 checkpoint_path = Path(checkpoint_value)
         except Exception:
-            checkpoint_path = None
+            pass
 
     if checkpoint_path is None:
         checkpoint_candidates = sorted((artifact_root / "checkpoints").glob("policy_value_cycle_*.pt"))
