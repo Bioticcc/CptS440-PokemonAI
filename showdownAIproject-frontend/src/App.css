@@ -92,6 +92,50 @@
   gap: 8px;
 }
 
+/* ------------- [ TOOL TIP STYLES ] ------------- */
+.tooltip-trigger {
+  /* position */
+  position: absolute;
+  top: 15px;
+  right: 15px;
+  width: 40px;
+  height: 40px;
+
+  /* circle shaping */
+  border-radius: 50%;
+  border: 2px solid #272727;
+  background: #2e8eff;
+  color: white;
+  display: flex;
+
+  /* other alignment */
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  cursor: pointer;
+
+  font-size: 20px;
+}
+
+/* actual little bubble for the tooltip */
+.tooltip-popup {
+  /* positioning */
+  position: absolute;
+  top: 50px;
+  right: 30px;
+
+  background: #1e1e1e;
+  color: white;
+  padding: 10px;
+  border-radius: 8px;
+  width: 250px;
+  font-size: 18px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+
+  /* put on top */
+  z-index: 1000; 
+}
+
 /* ------------- [ PANEL STYLES ] ------------- */
 .panel {
   border: 5px solid #c71e12;
@@ -201,6 +245,7 @@
   font-size: 26px;
   color: #4b4b4b;
 }
+
 /* -------- [ EXTRA BUTTONS! ] -------- */
 .left-buttons-row {
   display: grid;
@@ -343,7 +388,7 @@
 
 /* right blue buttons to simulate switches, we want squares! */
 .right-button-grid {
-  margin-top: 10px; 
+  margin-top: 10px;
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
   grid-template-rows: repeat(2, minmax(0, 1fr));
@@ -447,7 +492,7 @@
   border: 3px solid #051916;
   border-radius: 6px;
   background: #1f654d;
-  
+
   color: white;
   font-size: 20px;
   align-items: center;
@@ -469,6 +514,7 @@
 
 /* -------- [ we can hide items like this possibly! ] -------- */
 @media (max-width: 900px) {
+
   /* left panel */
   .circle-container,
   .curve-line,
@@ -478,8 +524,7 @@
   .right-button-grid,
   .right-row-1,
   .right-row-2,
-  .right-row-3
-  {
+  .right-row-3 {
     display: none;
   }
 }

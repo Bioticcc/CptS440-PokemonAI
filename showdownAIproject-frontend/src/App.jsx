@@ -12,6 +12,9 @@ function App() {
   const [challengeName, setChallengeName] = useState('')
   const [isSubmittingPrompt, setIsSubmittingPrompt] = useState(false)
 
+  // little tool tip to give the user some info
+  const [showToolTip, setShowToolTip] = useState(false)
+
   // for switching pokemon, we need to know our current active pokemon and we hide it as an option
   const activeSpecies = battle?.friendly?.active?.species;
 
@@ -179,6 +182,22 @@ function App() {
       {/* border to hold all coontent */}
       <div className="pokedex-border">
         <div className="pokedex-inner">
+
+          {/* tool tip */}
+          <div
+            className="tooltip-trigger"
+            onMouseEnter={() => setShowToolTip(true)}
+            onMouseLeave={() => setShowToolTip(false)}
+          >
+            ?
+          </div>
+
+          {showToolTip && (
+            <div className="tooltip-popup">
+              Moves are recommended using a star system, with 3 stars being the highest. <br /><br />
+              Click on a move to see our model's reasoning.
+            </div>
+          )}
 
           {/* left panel */}
           <section className="panel panel-left">
