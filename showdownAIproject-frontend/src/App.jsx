@@ -27,9 +27,10 @@ function App() {
   const gridMoves = battle?.legal_actions ?? []
 
   // the reasons for moves
-  const selectedMoveData = battle?.legal_actions?.find(
-    (m) => m.action_id === selectedMove
-  )
+  const selectedMoveData = selectedMove
+
+  // turn number
+  const turnNumber = battle?.turn ?? 1
 
   // live polling of battle state + runtime prompts
   useEffect(() => {
@@ -219,11 +220,14 @@ function App() {
                     <div
                       key={move.action_id}
                       className="move-box"
-                      onClick={() => { setSelectedMove(move.action_id) }}
+                      onClick={() => {
+                        setSelectedMove(move)
+                      }}
                       style={{
                         cursor: 'pointer',
                         border:
-                          selectedMove === move.action_id
+
+                          selectedMove?.action_id === move.action_id
                             ? "3px solid #17f944"
                             : "3px solid #333333"
                       }}
@@ -257,7 +261,7 @@ function App() {
                   <div className="left-button-rectangle" style={{ backgroundColor: '#75ff53' }} />
                   <div className="left-button-rectangle" style={{ backgroundColor: '#ff783d' }} />
                 </div>
-                
+
                 {/* TODO: hook this up with a select move */}
                 <div className="select-button">Select</div>
 
@@ -374,7 +378,9 @@ function App() {
 
             {/* row 3 has two big buttons */}
             <div className="right-row-3">
-              <div className="right-large-rectangle" />
+              <div className="right-large-rectangle">
+                <strong> Turn {battle?.turn ?? "?"}</strong>
+              </div>
               <div className="right-large-rectangle" />
             </div>
 

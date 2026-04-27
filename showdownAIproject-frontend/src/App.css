@@ -437,6 +437,12 @@
   border: 3px solid #051916;
   border-radius: 6px;
   background: #1f654d;
+  
+  color: white;
+  font-size: 20px;
+  align-items: center;
+  justify-content: center;
+  display: flex;
 }
 
 /* ------------- [ MIDDLE HINGE STYLES ] ------------- */
