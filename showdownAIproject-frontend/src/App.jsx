@@ -3,9 +3,6 @@ import { useEffect, useState } from 'react'
 import { fetchBattleState, fetchPrompt, submitPromptResponse } from './uiBridgeApi'
 
 // labeled dynamic data placeholders with TODO
-// note to self: fix resizing using clamp. OR, make the pokedex fill the whole screen.
-// that way it can be more of a "pop up pokedex" which can be a bit like a screen overlay
-// another option is to have the buttons hidden when we minimize
 
 function App() {
   //  DYNAMIC DATA USE STATES
