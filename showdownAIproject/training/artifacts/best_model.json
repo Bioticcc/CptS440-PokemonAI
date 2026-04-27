@@ -1,5 +1,5 @@
 {
-  "checkpoint_path": "/home/kyle/Desktop/Adam/CptS440-PokemonAI/showdownAIproject/training/artifacts/checkpoints/policy_value_cycle_0001_run_0006.pt",
+  "checkpoint_path": "/home/kyle/Desktop/Adam/CptS440-PokemonAI/showdownAIproject/training/artifacts/checkpoints/current_champion.pt",
   "games": 300,
   "promoted_at_utc": "2026-04-22T13:06:19.462686Z",
   "promotion_rule": {
