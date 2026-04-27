@@ -24,7 +24,12 @@ function App() {
     .sort((a, b) => b.score - a.score)
 
   const [selectedMove, setSelectedMove] = useState(null)
-  const gridMoves = battle?.legal_actions ?? []  
+  const gridMoves = battle?.legal_actions ?? []
+
+  // the reasons for moves
+  const selectedMoveData = battle?.legal_actions?.find(
+    (m) => m.action_id === selectedMove
+  )
 
   // live polling of battle state + runtime prompts
   useEffect(() => {
@@ -217,10 +222,10 @@ function App() {
                       onClick={() => { setSelectedMove(move.action_id) }}
                       style={{
                         cursor: 'pointer',
-                        border: 
-                        selectedMove === move.action_id
-                          ? "3px solid #17f944"
-                          : "3px solid #333333"
+                        border:
+                          selectedMove === move.action_id
+                            ? "3px solid #17f944"
+                            : "3px solid #333333"
                       }}
                     >
 
@@ -252,7 +257,8 @@ function App() {
                   <div className="left-button-rectangle" style={{ backgroundColor: '#75ff53' }} />
                   <div className="left-button-rectangle" style={{ backgroundColor: '#ff783d' }} />
                 </div>
-
+                
+                {/* TODO: hook this up with a select move */}
                 <div className="select-button">Select</div>
 
                 {/* d-pad, just two rectangles */}
@@ -280,11 +286,29 @@ function App() {
           <section className="panel panel-right">
             <div className="right-main-rectangle">
 
-              {/* TODO: move reasons */}
+              {/* move reasons */}
               <p className="right-text">
                 <span className="right-text-arrow">&#10148;</span>
-                <strong><u>Reasons:</u></strong> new status bonus: +80.00; move order: +75.00
+                <strong><u>
+                  {selectedMoveData ? selectedMoveData.move_name : ""} Reasons:
+                </u></strong>
               </p>
+
+              {selectedMoveData ? (
+                <ul className="right-sublist">
+                  {/* list of reasons */}
+                  {selectedMoveData.reasons?.length > 0 ? (
+                    selectedMoveData.reasons.map((reason, i) => (
+                      <li key={i}>{reason}</li>
+                    ))
+                  ) : (
+                    <li>No reasoning available.</li>
+                  )}
+                </ul>
+              ) : (
+                // when no move is selected (default)
+                <p className="right-text">Click a move to see its reasoning.</p>
+              )}
 
               {/* opponent info (type, known moves, known switches) */}
               <p className="right-text">
@@ -312,7 +336,6 @@ function App() {
                     {pokemon.species}
                   </button>
                 ))}
-
 
               {/* 6-10 can hold the stars of how good the switch is, and status of pokemon (fainted? sleep?) */}
               {battle?.friendly?.team

@@ -1,14 +1,14 @@
 /* ------------- [ BASIC SETUP STYLES ] ------------- */
 .app-shell {
-  min-height: 100svh;
+  height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 20px;
+  gap: 0;
+  padding: 0;
   box-sizing: border-box;
-  /* center vertically & horizontally */
-  align-items: center;
-  justify-content: center;
+  align-items: stretch;
+  justify-content: flex-start;
 }
 
 .runtime-menu-card {
@@ -74,12 +74,14 @@
 }
 
 .pokedex-border {
-  width: min(920px, 100%);
-  aspect-ratio: 16 / 10;
+  width: 100%;
+  flex: 1;
+  min-height: 0;
   border: 5px solid #c71e12;
   border-radius: 4px;
   background: #fb5f54;
   padding: 14px;
+  box-sizing: border-box;
 }
 
 .pokedex-inner {

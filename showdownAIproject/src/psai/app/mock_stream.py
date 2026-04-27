@@ -205,7 +205,7 @@ def make_mock_suggestions(state: State):
             score=150.00,
             reasons=[
                 "new status bonus: +80.00",
-                "move_order: +75.00",
+                "move order: +75.00",
                 "type effectiveness: +60.00",
             ],
             breakdown={
