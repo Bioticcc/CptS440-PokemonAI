@@ -13,6 +13,7 @@ __all__ = [
     "main",
     "pokeEnvPlayerInfo",
     "run_battle",
+    "run_UI_battle",
     "send_confirmed_move",
 ]
 

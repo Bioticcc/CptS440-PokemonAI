@@ -1,0 +1,32 @@
+@import url("https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@400;500;700&display=swap");
+
+:root {
+  --sans: "Pixelify Sans", sans-serif;
+  --heading: "Pixelify Sans", sans-serif;
+  --mono: "Pixelify Sans", monospace;
+  font-family: "Pixelify Sans", sans-serif;
+}
+
+body {
+  margin: 0;
+  font-family: "Pixelify Sans", sans-serif;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+#root {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  text-align: center;
+  border-inline: 0;
+  min-height: 100svh;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
