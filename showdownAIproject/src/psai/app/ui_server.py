@@ -1,53 +1,72 @@
-"""
-FastAPI server exposing battle state to the frontend UI
-Basically for our HTTP endpoints that reach React UI
+"""FastAPI server exposing battle and UI interaction state for frontend runtime."""
 
-By default it returns the latest state from the ui_bridge module,
-but can possibly fall back to mock data when no live battle is active
+from __future__ import annotations
 
-Originally I tested with the commented out mock data stream
-So for testing, we can use that endpoint instead of the actually live endpoint
-"""
+from typing import Any
 
-# Plain-English summary:
-# This file is the API that the frontend uses to see current battle info
-
-from fastapi import FastAPI
-from psai.mechanics.api import MechanicsAPI
-from psai.app.ui_payload import build_ui_payload
-from psai.app.mock_stream import make_mock_state
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from psai.app.ui_bridge import get_state
+from pydantic import BaseModel
 
-# using FastAPI for simple API endpoints
+from psai.app.ui_bridge import get_interaction_port, get_state
+from psai.app.ui_payload import build_ui_payload
+from psai.mechanics.api import MechanicsAPI
+
 app = FastAPI()
 mechanics = MechanicsAPI()
 
-# due to connection errors with the frontend sending requests to the API
-# added CORS middleware to allow requests
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # frontend
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# actually getting live state
-@app.get("/state")
-def get_state_endpoint():
-    state = get_state()
 
+class PromptResponseRequest(BaseModel):
+    prompt_id: int
+    choice_id: str | None = None
+    value: str | None = None
+
+
+@app.get("/state")
+def get_state_endpoint() -> dict[str, Any]:
+    state = get_state()
     if state is None:
         return {"battle_tag": "no_battle"}
-
     return build_ui_payload(state, mechanics)
 
-# OLD TESTING ENDPOINT - TESTING WITH LIVE BATTLE NOW. uncomment this one if you want to test via mock stream
-# ex: http://127.0.0.1:8000/state?turn=5
-# this will show the payloads from the mock stream's turn 5
-# @app.get("/state")
-# def get_state(turn: int = 1):
-#     # single snapshot of battle state
-#     state = make_mock_state(turn)
-#     return build_ui_payload(state, mechanics)
+
+@app.get("/ui/prompt")
+def get_ui_prompt_endpoint() -> dict[str, Any]:
+    interaction_port = get_interaction_port()
+    if interaction_port is None or not hasattr(interaction_port, "get_prompt_snapshot"):
+        return {"prompt": None}
+    return {"prompt": interaction_port.get_prompt_snapshot()}
+
+
+@app.post("/ui/response")
+def post_ui_response_endpoint(payload: PromptResponseRequest) -> dict[str, Any]:
+    interaction_port = get_interaction_port()
+    if interaction_port is None or not hasattr(interaction_port, "submit_prompt_response"):
+        raise HTTPException(status_code=409, detail="ui_interaction_unavailable")
+
+    accepted, reason = interaction_port.submit_prompt_response(
+        prompt_id=int(payload.prompt_id),
+        choice_id=payload.choice_id,
+        value=payload.value,
+    )
+    if not accepted:
+        status_code = 409 if reason in {"stale_prompt", "no_active_prompt"} else 400
+        raise HTTPException(status_code=status_code, detail=reason)
+
+    return {"accepted": True}
+
+
+@app.get("/ui/logs")
+def get_ui_logs_endpoint(since: int = Query(default=0, ge=0)) -> dict[str, Any]:
+    interaction_port = get_interaction_port()
+    if interaction_port is None or not hasattr(interaction_port, "get_logs_since"):
+        return {"cursor": int(since), "items": []}
+    return interaction_port.get_logs_since(int(since))

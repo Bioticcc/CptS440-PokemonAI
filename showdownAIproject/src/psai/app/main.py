@@ -9,16 +9,19 @@
 # ========================================
 
 from __future__ import annotations
-
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import re
 import select
+import subprocess
 import sys
+import threading
 import time
 from typing import Any
+import urllib.request
 
 from poke_env import AccountConfiguration, ShowdownServerConfiguration
 from poke_env.battle.abstract_battle import AbstractBattle
@@ -36,6 +39,8 @@ from psai.app.connections import (
     _safe_send_challenge,
     _wait_for_active_battle,
 )
+from psai.app.interaction import ConsoleInteractionPort, HttpBridgeInteractionPort, ManualInteractionPort
+from psai.app.ui_bridge import set_interaction_port
 from psai.decision.chooser import ModelBonusFn, MoveSuggestion, choose_actions
 from psai.domain.state import State, parse_battle_to_state
 from psai.mechanics.api import MechanicsAPI
@@ -550,6 +555,41 @@ def _timed_input(prompt: str, timeout_seconds: float) -> str | None:
     return line.strip()
 
 
+def _interaction_emit(interaction_port: ManualInteractionPort | None, text: str) -> None:
+    if interaction_port is None:
+        print(text)
+        return
+    interaction_port.emit(text)
+
+
+def _interaction_prompt(
+    interaction_port: ManualInteractionPort | None,
+    *,
+    kind: str,
+    message: str,
+    options: list[dict[str, str]] | None = None,
+    timeout_seconds: float | None = None,
+    allow_text: bool = False,
+    metadata: dict[str, Any] | None = None,
+) -> str | None:
+    if interaction_port is None:
+        if timeout_seconds is None:
+            try:
+                return input(message).strip()
+            except EOFError:
+                return None
+        return _timed_input(message, timeout_seconds)
+
+    return interaction_port.prompt(
+        kind=kind,
+        message=message,
+        options=options,
+        timeout_seconds=timeout_seconds,
+        allow_text=allow_text,
+        metadata=metadata,
+    )
+
+
 def _build_recommendation_ranks(turn_suggestions: list[MoveSuggestion]) -> dict[str, int]:
     ranks: dict[str, int] = {}
     for suggestion in turn_suggestions:
@@ -610,6 +650,7 @@ def _prompt_user_choice_for_request(
     turn_suggestions: list[MoveSuggestion],
     *,
     user_timeout_seconds: float = 60.0,
+    interaction_port: ManualInteractionPort | None = None,
 ) -> tuple[Any, str]:
     auto_order, auto_action_id = _choose_order_for_request(
         player,
@@ -620,16 +661,17 @@ def _prompt_user_choice_for_request(
 
     request_seconds_remaining = _extract_request_remaining_seconds(battle)
     if request_seconds_remaining is not None and request_seconds_remaining <= 30:
-        print(
+        _interaction_emit(
+            interaction_port,
             f"[manual] timer is at {request_seconds_remaining}s. "
-            "Auto-selecting #1 ranked move."
+            "Auto-selecting #1 ranked move.",
         )
         return auto_order, auto_action_id
 
     available_moves = list(getattr(battle, "available_moves", []) or [])
     available_switches = list(getattr(battle, "available_switches", []) or [])
     if not available_moves and not available_switches:
-        print("[manual] no selectable actions found. Using automatic fallback.")
+        _interaction_emit(interaction_port, "[manual] no selectable actions found. Using automatic fallback.")
         return auto_order, auto_action_id
 
     recommendation_ranks = _build_recommendation_ranks(turn_suggestions)
@@ -638,75 +680,103 @@ def _prompt_user_choice_for_request(
     while True:
         request_seconds_remaining = _extract_request_remaining_seconds(battle)
         if request_seconds_remaining is not None and request_seconds_remaining <= 30:
-            print(
+            _interaction_emit(
+                interaction_port,
                 f"[manual] timer is at {request_seconds_remaining}s. "
-                "Auto-selecting #1 ranked move."
+                "Auto-selecting #1 ranked move.",
             )
             return auto_order, auto_action_id
 
         remaining = deadline - time.time()
         if remaining <= 0:
-            print("[manual] no user selection within 60 seconds. Auto-selecting #1 ranked move.")
+            _interaction_emit(interaction_port, "[manual] no user selection within 60 seconds. Auto-selecting #1 ranked move.")
             return auto_order, auto_action_id
 
-        print("1. Attack")
-        print("2. Switch")
-        print("3. Forfeit")
-        mode_choice = _timed_input(
-            f"Choose 1, 2, or 3 ({int(max(1, remaining))}s left): ",
-            min(remaining, 20.0),
+        mode_choice = _interaction_prompt(
+            interaction_port,
+            kind="battle_mode",
+            message=f"Choose 1, 2, or 3 ({int(max(1, remaining))}s left): ",
+            options=[
+                {"id": "1", "label": "Attack"},
+                {"id": "2", "label": "Switch"},
+                {"id": "3", "label": "Forfeit"},
+            ],
+            timeout_seconds=min(remaining, 20.0),
+            metadata={
+                "battle_tag": str(getattr(battle, "battle_tag", "") or ""),
+                "turn": int(getattr(state, "turn_number", 0) or 0),
+            },
         )
         if mode_choice is None:
             continue
         if mode_choice not in {"1", "2", "3"}:
-            print("[manual] invalid choice; please enter 1, 2, or 3.")
+            _interaction_emit(interaction_port, "[manual] invalid choice; please enter 1, 2, or 3.")
             continue
 
         if mode_choice == "3":
             remaining = deadline - time.time()
             if remaining <= 0:
-                print("[manual] input timed out. Auto-selecting #1 ranked move.")
+                _interaction_emit(interaction_port, "[manual] input timed out. Auto-selecting #1 ranked move.")
                 return auto_order, auto_action_id
-            confirmation = _timed_input(
-                f"Type FORFEIT to confirm ({int(max(1, remaining))}s left): ",
-                min(remaining, 20.0),
+            confirmation = _interaction_prompt(
+                interaction_port,
+                kind="forfeit_confirm",
+                message=f"Confirm forfeit ({int(max(1, remaining))}s left): ",
+                options=[
+                    {"id": "confirm", "label": "Confirm Forfeit"},
+                    {"id": "cancel", "label": "Cancel"},
+                ],
+                timeout_seconds=min(remaining, 20.0),
+                allow_text=True,
             )
             if confirmation is None:
                 continue
-            if confirmation.strip().lower() != "forfeit":
-                print("[manual] forfeit cancelled.")
+            normalized_confirmation = confirmation.strip().lower()
+            if normalized_confirmation not in {"confirm", "forfeit", "yes"}:
+                _interaction_emit(interaction_port, "[manual] forfeit cancelled.")
                 continue
             chosen_order = player.create_order("/forfeit")
             return chosen_order, "forfeit"
 
         if mode_choice == "1":
             if not available_moves:
-                print("[manual] no attack options available this turn.")
+                _interaction_emit(interaction_port, "[manual] no attack options available this turn.")
                 continue
-            print("Attack options:")
+            attack_options: list[dict[str, str]] = []
             for index, move in enumerate(available_moves, start=1):
                 action_id = _move_action_id_from_move(move)
                 move_name = str(getattr(move, "id", None) or getattr(move, "move", None) or f"move_{index}")
                 suffix = _recommendation_suffix(action_id, recommendation_ranks)
-                print(f"  {index}. {move_name}{suffix}")
+                attack_options.append(
+                    {
+                        "id": str(index),
+                        "label": f"{move_name}{suffix}",
+                    }
+                )
 
             remaining = deadline - time.time()
             if remaining <= 0:
-                print("[manual] input timed out. Auto-selecting #1 ranked move.")
+                _interaction_emit(interaction_port, "[manual] input timed out. Auto-selecting #1 ranked move.")
                 return auto_order, auto_action_id
-            slot_text = _timed_input(
-                f"Select attack number ({int(max(1, remaining))}s left): ",
-                min(remaining, 20.0),
+            slot_text = _interaction_prompt(
+                interaction_port,
+                kind="attack_slot",
+                message=f"Select attack number ({int(max(1, remaining))}s left): ",
+                options=attack_options,
+                timeout_seconds=min(remaining, 20.0),
+                metadata={
+                    "battle_tag": str(getattr(battle, "battle_tag", "") or ""),
+                },
             )
             if slot_text is None:
                 continue
             try:
                 slot_index = int(slot_text)
             except ValueError:
-                print("[manual] invalid attack selection.")
+                _interaction_emit(interaction_port, "[manual] invalid attack selection.")
                 continue
             if slot_index < 1 or slot_index > len(available_moves):
-                print("[manual] attack selection is out of range.")
+                _interaction_emit(interaction_port, "[manual] attack selection is out of range.")
                 continue
 
             selected_move = available_moves[slot_index - 1]
@@ -715,9 +785,9 @@ def _prompt_user_choice_for_request(
             return chosen_order, chosen_action_id
 
         if not available_switches:
-            print("[manual] no switch options available this turn.")
+            _interaction_emit(interaction_port, "[manual] no switch options available this turn.")
             continue
-        print("Switch options:")
+        switch_options: list[dict[str, str]] = []
         for index, switch_target in enumerate(available_switches, start=1):
             action_id = _switch_action_id_from_target(switch_target)
             switch_name = str(
@@ -726,25 +796,36 @@ def _prompt_user_choice_for_request(
                 or f"switch_{index}"
             )
             suffix = _recommendation_suffix(action_id, recommendation_ranks)
-            print(f"  {index}. {switch_name}{suffix}")
+            switch_options.append(
+                {
+                    "id": str(index),
+                    "label": f"{switch_name}{suffix}",
+                }
+            )
 
         remaining = deadline - time.time()
         if remaining <= 0:
-            print("[manual] input timed out. Auto-selecting #1 ranked move.")
+            _interaction_emit(interaction_port, "[manual] input timed out. Auto-selecting #1 ranked move.")
             return auto_order, auto_action_id
-        slot_text = _timed_input(
-            f"Select switch number ({int(max(1, remaining))}s left): ",
-            min(remaining, 20.0),
+        slot_text = _interaction_prompt(
+            interaction_port,
+            kind="switch_slot",
+            message=f"Select switch number ({int(max(1, remaining))}s left): ",
+            options=switch_options,
+            timeout_seconds=min(remaining, 20.0),
+            metadata={
+                "battle_tag": str(getattr(battle, "battle_tag", "") or ""),
+            },
         )
         if slot_text is None:
             continue
         try:
             slot_index = int(slot_text)
         except ValueError:
-            print("[manual] invalid switch selection.")
+            _interaction_emit(interaction_port, "[manual] invalid switch selection.")
             continue
         if slot_index < 1 or slot_index > len(available_switches):
-            print("[manual] switch selection is out of range.")
+            _interaction_emit(interaction_port, "[manual] switch selection is out of range.")
             continue
 
         selected_switch = available_switches[slot_index - 1]
@@ -774,9 +855,13 @@ def _write_player_wr_log(
         handle.write("\n")
 
 
-def _print_player_wr_summary(path: Path) -> None:
+def _print_player_wr_summary(
+    path: Path,
+    *,
+    interaction_port: ManualInteractionPort | None = None,
+) -> None:
     if not path.exists():
-        print("No all-time winrate records yet.")
+        _interaction_emit(interaction_port, "No all-time winrate records yet.")
         return
 
     wins = 0
@@ -802,15 +887,19 @@ def _print_player_wr_summary(path: Path) -> None:
                 ties += 1
 
     wr = (wins / (wins + losses)) if (wins + losses) > 0 else 0.0
-    print("All-time Battle Record")
-    print(f"  Total battles: {total}")
-    print(f"  Wins: {wins}")
-    print(f"  Losses: {losses}")
-    print(f"  Ties/Other: {ties}")
-    print(f"  Win rate (excl ties): {wr * 100.0:.2f}%")
+    _interaction_emit(interaction_port, "All-time Battle Record")
+    _interaction_emit(interaction_port, f"  Total battles: {total}")
+    _interaction_emit(interaction_port, f"  Wins: {wins}")
+    _interaction_emit(interaction_port, f"  Losses: {losses}")
+    _interaction_emit(interaction_port, f"  Ties/Other: {ties}")
+    _interaction_emit(interaction_port, f"  Win rate (excl ties): {wr * 100.0:.2f}%")
 
 
-def _print_outcome_banner(result: str) -> None:
+def _print_outcome_banner(
+    result: str,
+    *,
+    interaction_port: ManualInteractionPort | None = None,
+) -> None:
     if result == "win":
         banner = [
             "+-----------------------------+",
@@ -830,7 +919,7 @@ def _print_outcome_banner(result: str) -> None:
             "+-----------------------------+",
         ]
     for line in banner:
-        print(line)
+        _interaction_emit(interaction_port, line)
 
 
 def _run_manual_connected_battle(
@@ -846,6 +935,7 @@ def _run_manual_connected_battle(
     max_turns: int | None = None,
     user_timeout_seconds: float = 60.0,
     state_callback: Any = None,
+    interaction_port: ManualInteractionPort | None = None,
 ) -> None:
     battle, runner = _wait_for_active_battle(
         player,
@@ -856,11 +946,11 @@ def _run_manual_connected_battle(
         timeout_seconds=240.0 if launch_mode == "ladder" else 180.0,
     )
     if battle is None:
-        print("[manual] no battle was found before timeout. Returning to menu.")
+        _interaction_emit(interaction_port, "[manual] no battle was found before timeout. Returning to menu.")
         return
 
     battle_tag = str(getattr(battle, "battle_tag", id(battle)) or id(battle))
-    print(f"[manual] connected to battle {battle_tag}")
+    _interaction_emit(interaction_port, f"[manual] connected to battle {battle_tag}")
 
     previous_pending_timeout = float(getattr(player, "_pending_order_timeout_seconds", 15.0))
     if hasattr(player, "_pending_order_timeout_seconds"):
@@ -886,9 +976,10 @@ def _run_manual_connected_battle(
             if last_prompted_request == request_signature:
                 elapsed = now - last_prompted_at
                 if elapsed >= retry_same_request_after_seconds and last_submitted_order is not None:
-                    print(
+                    _interaction_emit(
+                        interaction_port,
                         f"[manual] request_stalled battle={battle_tag} "
-                        f"waited={elapsed:.1f}s; resubmitting latest order"
+                        f"waited={elapsed:.1f}s; resubmitting latest order",
                     )
                     if hasattr(player, "set_pending_order"):
                         player.set_pending_order(battle_tag, last_submitted_order)
@@ -899,9 +990,10 @@ def _run_manual_connected_battle(
             try:
                 state = parse_battle_to_state(battle)
             except Exception as exc:
-                print(
+                _interaction_emit(
+                    interaction_port,
                     f"[manual] parse_state_failed battle={battle_tag} "
-                    f"error={type(exc).__name__}: {exc}. Sending default order."
+                    f"error={type(exc).__name__}: {exc}. Sending default order.",
                 )
                 chosen_order = _default_order(player)
                 if hasattr(player, "set_pending_order"):
@@ -925,16 +1017,29 @@ def _run_manual_connected_battle(
             if state_callback is not None:
                 state_callback(state)
 
-            print(_render_ascii_battle_view(state, battle))
-            _print_ranked_suggestions_short(turn_suggestions, top_k=top_k)
+            _interaction_emit(interaction_port, _render_ascii_battle_view(state, battle))
+            _interaction_emit(interaction_port, "Top model suggestions:")
+            if not turn_suggestions:
+                _interaction_emit(interaction_port, "  (none available for this request)")
+            else:
+                for suggestion in turn_suggestions[: max(1, int(top_k))]:
+                    reason_text = "; ".join(suggestion.reasons[:2]) if suggestion.reasons else "no breakdown available"
+                    _interaction_emit(
+                        interaction_port,
+                        (
+                            f"  #{suggestion.rank} {suggestion.action.action_id} "
+                            f"(score={suggestion.score:.2f}) -> {reason_text}"
+                        ),
+                    )
             chosen_order, chosen_action_id = _prompt_user_choice_for_request(
                 player,
                 battle,
                 state,
                 turn_suggestions,
                 user_timeout_seconds=user_timeout_seconds,
+                interaction_port=interaction_port,
             )
-            print(f"[manual] selected action: {chosen_action_id}")
+            _interaction_emit(interaction_port, f"[manual] selected action: {chosen_action_id}")
 
             if hasattr(player, "set_pending_order"):
                 player.set_pending_order(battle_tag, chosen_order)
@@ -945,12 +1050,12 @@ def _run_manual_connected_battle(
 
             if chosen_action_id == "forfeit":
                 manual_forfeit_requested = True
-                print("[manual] forfeit submitted.")
+                _interaction_emit(interaction_port, "[manual] forfeit submitted.")
                 break
 
             turns_ran += 1
             if max_turns is not None and turns_ran >= max_turns:
-                print(f"[manual] max_turns={max_turns} reached; stopping manual battle loop.")
+                _interaction_emit(interaction_port, f"[manual] max_turns={max_turns} reached; stopping manual battle loop.")
                 break
 
             time.sleep(0.1)
@@ -964,7 +1069,7 @@ def _run_manual_connected_battle(
         result_label = "loss"
 
     if getattr(battle, "finished", False) or manual_forfeit_requested:
-        _print_outcome_banner(result_label)
+        _print_outcome_banner(result_label, interaction_port=interaction_port)
         _write_player_wr_log(
             wr_log_path,
             battle=battle,
@@ -973,7 +1078,7 @@ def _run_manual_connected_battle(
         )
         _safe_cleanup_finished_battle(player, battle_tag, phase_label="manual", verbose=True)
     else:
-        print("[manual] battle loop ended before battle finished.")
+        _interaction_emit(interaction_port, "[manual] battle loop ended before battle finished.")
 
 # ========================================
 # Internal Request and Order Helpers
@@ -1273,6 +1378,8 @@ def run_battle(
     runtime_model_bonus_weight: float = 90.0,
     runtime_default_hidden_sizes: tuple[int, ...] = (256, 128),
     state_callback: Any = None, # to expose state info to the UI , through run_manual_connected_battle (more details of battle)
+    model_checkpoint_path: str | Path | None = None,
+    interaction_port: ManualInteractionPort | None = None,
 ) -> None:
     # Manual product mode menu:
     # 1) Ladder game
@@ -1280,6 +1387,7 @@ def run_battle(
     # 3) View all-time win rate
     # 4) Quit
     wr_log = Path(wr_log_path)
+    resolved_interaction_port: ManualInteractionPort = interaction_port or ConsoleInteractionPort()
     resolved_model = model
     if resolved_model is None:
         resolved_model, checkpoint_path = _load_runtime_model_bonus(
@@ -1287,23 +1395,38 @@ def run_battle(
             artifact_dir=runtime_artifact_dir,
             model_bonus_weight=runtime_model_bonus_weight,
             default_hidden_sizes=runtime_default_hidden_sizes,
+            checkpoint_path_override=model_checkpoint_path,
         )
         if checkpoint_path is None:
-            print("[manual] launching with heuristic-only suggestions.")
+            _interaction_emit(resolved_interaction_port, "[manual] launching with heuristic-only suggestions.")
 
     while True:
-        print("")
-        print("==============================================")
-        print("Pokemon AI Console Menu")
-        print("1. Connect to a ladder game")
-        print("2. Challenge a player")
-        print("3. View my all-time winrate")
-        print("4. Quit")
-        print("==============================================")
-        menu_choice = input("Select option (1-4): ").strip()
+        _interaction_emit(resolved_interaction_port, "")
+        _interaction_emit(resolved_interaction_port, "==============================================")
+        _interaction_emit(resolved_interaction_port, "Pokemon AI Console Menu")
+        _interaction_emit(resolved_interaction_port, "1. Connect to a ladder game")
+        _interaction_emit(resolved_interaction_port, "2. Challenge a player")
+        _interaction_emit(resolved_interaction_port, "3. View my all-time winrate")
+        _interaction_emit(resolved_interaction_port, "4. Quit")
+        _interaction_emit(resolved_interaction_port, "==============================================")
+        menu_choice = _interaction_prompt(
+            resolved_interaction_port,
+            kind="main_menu",
+            message="Select option (1-4): ",
+            options=[
+                {"id": "1", "label": "Connect to ladder"},
+                {"id": "2", "label": "Challenge a player"},
+                {"id": "3", "label": "View all-time winrate"},
+                {"id": "4", "label": "Quit"},
+            ],
+            timeout_seconds=None,
+        )
+        if menu_choice is None:
+            continue
+        menu_choice = str(menu_choice).strip()
 
         if menu_choice == "1":
-            print("[manual] launching ladder game...")
+            _interaction_emit(resolved_interaction_port, "[manual] launching ladder game...")
             _safe_reset_battles(player)
             runner = _launch_single_game(player)
             _run_manual_connected_battle(
@@ -1318,18 +1441,27 @@ def run_battle(
                 max_turns=max_turns,
                 user_timeout_seconds=user_timeout_seconds,
                 state_callback=state_callback,
+                interaction_port=resolved_interaction_port,
             )
             continue
 
         if menu_choice == "2":
-            opponent_name = input("Enter player name to challenge: ").strip()
+            opponent_name = _interaction_prompt(
+                resolved_interaction_port,
+                kind="challenge_username",
+                message="Enter player name to challenge: ",
+                timeout_seconds=None,
+                allow_text=True,
+            )
+            if opponent_name is not None:
+                opponent_name = str(opponent_name).strip()
             if not opponent_name:
-                print("[manual] challenge cancelled: no opponent entered.")
+                _interaction_emit(resolved_interaction_port, "[manual] challenge cancelled: no opponent entered.")
                 continue
             _safe_reset_battles(player)
-            print(f"[manual] sending challenge to {opponent_name}...")
+            _interaction_emit(resolved_interaction_port, f"[manual] sending challenge to {opponent_name}...")
             if not _safe_send_challenge(player, opponent_name, phase_label="manual"):
-                print("[manual] challenge was not sent. Returning to menu.")
+                _interaction_emit(resolved_interaction_port, "[manual] challenge was not sent. Returning to menu.")
                 continue
             _run_manual_connected_battle(
                 player,
@@ -1343,18 +1475,22 @@ def run_battle(
                 max_turns=max_turns,
                 user_timeout_seconds=user_timeout_seconds,
                 state_callback=state_callback,
+                interaction_port=resolved_interaction_port,
             )
             continue
 
         if menu_choice == "3":
-            _print_player_wr_summary(wr_log)
+            _print_player_wr_summary(
+                wr_log,
+                interaction_port=resolved_interaction_port,
+            )
             continue
 
         if menu_choice == "4":
-            print("[manual] exiting menu.")
+            _interaction_emit(resolved_interaction_port, "[manual] exiting menu.")
             break
 
-        print("[manual] invalid menu option. Please select 1-4.")
+        _interaction_emit(resolved_interaction_port, "[manual] invalid menu option. Please select 1-4.")
 
 
 def run_training_battle(
@@ -2168,98 +2304,228 @@ def _resolve_best_checkpoint_path(artifact_dir: str | Path = "training/artifacts
     return checkpoint_path.resolve()
 
 
-def _infer_hidden_sizes_from_checkpoint(checkpoint_path: str | Path) -> tuple[int, ...]:
-    try:
-        import torch
-    except Exception:
-        return ()
-
-    try:
-        payload = torch.load(Path(checkpoint_path), map_location="cpu")
-    except Exception:
-        return ()
-
-    if not isinstance(payload, dict):
-        return ()
-    state_dict = payload.get("model_state_dict")
-    if not isinstance(state_dict, dict):
-        return ()
-
-    discovered: list[tuple[int, int]] = []
-    for key, tensor in state_dict.items():
-        match = re.fullmatch(r"trunk\.(\d+)\.weight", str(key))
-        if match is None:
-            continue
-        shape = getattr(tensor, "shape", None)
-        if shape is None or len(shape) != 2:
-            continue
-        try:
-            layer_index = int(match.group(1))
-            out_dim = int(shape[0])
-        except Exception:
-            continue
-        discovered.append((layer_index, out_dim))
-
-    discovered.sort(key=lambda item: item[0])
-    return tuple(out_dim for _, out_dim in discovered)
-
-
 def _load_runtime_model_bonus(
     *,
     log_path: str | Path = "training/battle_logs.jsonl",
     artifact_dir: str | Path = "training/artifacts",
     model_bonus_weight: float = 90.0,
     default_hidden_sizes: tuple[int, ...] = (256, 128),
+    checkpoint_path_override: str | Path | None = None,
 ) -> tuple[ModelBonusFn | None, Path | None]:
-    try:
-        checkpoint_path = _resolve_best_checkpoint_path(artifact_dir)
-    except Exception as exc:
-        print(
-            "[manual] no checkpoint found; using heuristic-only suggestions "
-            f"({type(exc).__name__}: {exc})"
-        )
-        return None, None
+    checkpoint_path: Path | None = None
+    if checkpoint_path_override is not None:
+        try:
+            checkpoint_candidate = Path(checkpoint_path_override)
+            if not checkpoint_candidate.is_absolute():
+                checkpoint_candidate = Path.cwd() / checkpoint_candidate
+            checkpoint_path = checkpoint_candidate.resolve()
+            if not checkpoint_path.exists():
+                raise FileNotFoundError(f"checkpoint not found: {checkpoint_path}")
+        except Exception as exc:
+            print(
+                "[manual] explicit checkpoint load requested, but path was invalid; "
+                f"using heuristic-only suggestions ({type(exc).__name__}: {exc})"
+            )
+            return None, None
+    else:
+        try:
+            checkpoint_path = _resolve_best_checkpoint_path(artifact_dir)
+        except Exception as exc:
+            print(
+                "[manual] no checkpoint found; using heuristic-only suggestions "
+                f"({type(exc).__name__}: {exc})"
+            )
+            return None, None
+    assert checkpoint_path is not None
 
     records = read_log_records(log_path)
     if not records:
         print("[manual] no battle logs found; using heuristic-only suggestions.")
         return None, checkpoint_path
 
-    candidate_hidden_sizes: list[tuple[int, ...]] = []
-    inferred_hidden_sizes = _infer_hidden_sizes_from_checkpoint(checkpoint_path)
-    if inferred_hidden_sizes:
-        candidate_hidden_sizes.append(inferred_hidden_sizes)
-    if tuple(default_hidden_sizes) not in candidate_hidden_sizes:
-        candidate_hidden_sizes.append(tuple(default_hidden_sizes))
-    for fallback in ((128, 64),):
-        if fallback not in candidate_hidden_sizes:
-            candidate_hidden_sizes.append(fallback)
-
     input_dim = len(records[0].state_features)
-    for hidden_sizes in candidate_hidden_sizes:
-        model = PolicyValueMLP(
-            input_dim=input_dim,
-            hidden_sizes=hidden_sizes,
-            action_dim=4,
-        )
-        try:
-            load_checkpoint(checkpoint_path, model)
-        except Exception as exc:
-            print(
-                f"[manual] checkpoint load failed hidden_sizes={hidden_sizes} "
-                f"error={type(exc).__name__}: {exc}"
-            )
-            continue
-
-        model_bonus = build_model_bonus_fn(model, weight=model_bonus_weight)
+    model = PolicyValueMLP(
+        input_dim=input_dim,
+        hidden_sizes=tuple(default_hidden_sizes),
+        action_dim=4,
+    )
+    try:
+        load_checkpoint(checkpoint_path, model)
+    except Exception as exc:
         print(
-            f"[manual] loaded checkpoint for suggestions: {checkpoint_path} "
-            f"hidden_sizes={hidden_sizes}"
+            f"[manual] checkpoint load failed for {checkpoint_path} "
+            f"error={type(exc).__name__}: {exc}. Using heuristic-only suggestions."
         )
-        return model_bonus, checkpoint_path
+        return None, checkpoint_path
 
-    print("[manual] unable to load checkpoint; using heuristic-only suggestions.")
-    return None, checkpoint_path
+    model_bonus = build_model_bonus_fn(model, weight=model_bonus_weight)
+    print(
+        f"[manual] loaded checkpoint for suggestions: {checkpoint_path} "
+        f"hidden_sizes={tuple(default_hidden_sizes)}"
+    )
+    return model_bonus, checkpoint_path
+
+
+def _wait_for_http_ready(url: str, *, timeout_seconds: float = 15.0) -> bool:
+    deadline = time.time() + max(1.0, float(timeout_seconds))
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=1.5) as response:
+                if int(getattr(response, "status", 200)) < 500:
+                    return True
+        except Exception:
+            time.sleep(0.2)
+    return False
+
+
+def _launch_electron_runtime(
+    *,
+    host: str,
+    port: int,
+) -> subprocess.Popen:
+    project_root = Path(__file__).resolve().parents[3]
+    frontend_root = project_root.parent / "showdownAIproject-frontend"
+    if not frontend_root.exists():
+        raise FileNotFoundError(f"Frontend directory not found: {frontend_root}")
+    node_modules = frontend_root / "node_modules"
+    if not node_modules.exists():
+        raise RuntimeError(
+            "Frontend dependencies are missing. Run `npm install` in "
+            f"{frontend_root} before launching electron UI mode."
+        )
+
+    dist_dir = frontend_root / "dist"
+    dist_js = dist_dir / "app.js"
+    dist_css = dist_dir / "app.css"
+    desktop_entry = frontend_root / "index.html"
+
+    env = dict(os.environ)
+    env.update(
+        {
+            "PSAI_BACKEND_ORIGIN": f"http://{host}:{int(port)}",
+            "PSAI_ELECTRON_ENTRY_FILE": str(desktop_entry),
+        }
+    )
+
+    build_process = subprocess.run(
+        ["npm", "run", "build"],
+        cwd=frontend_root,
+        env=env,
+        text=True,
+        check=False,
+    )
+    if int(build_process.returncode) != 0:
+        raise RuntimeError("Frontend build failed; cannot launch Electron UI mode.")
+
+    missing_artifacts = [
+        str(path) for path in (desktop_entry, dist_js, dist_css) if not path.exists()
+    ]
+    if missing_artifacts:
+        raise RuntimeError(
+            "Frontend build completed but required artifacts were missing: "
+            + ", ".join(missing_artifacts)
+        )
+
+    electron_process = subprocess.Popen(
+        ["npm", "run", "electron"],
+        cwd=frontend_root,
+        env=env,
+        text=True,
+    )
+
+    return electron_process
+
+
+def _stop_process(process: subprocess.Popen | None) -> None:
+    if process is None:
+        return
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5.0)
+    except Exception:
+        process.kill()
+        try:
+            process.wait(timeout=2.0)
+        except Exception:
+            pass
+
+
+def _run_electron_ui_mode(
+    *,
+    player: Any,
+    mechanics: MechanicsAPI,
+    model_checkpoint_path: str | None,
+    host: str,
+    port: int,
+) -> int:
+    try:
+        import uvicorn
+    except Exception as exc:
+        raise RuntimeError(
+            "electron-ui mode requires uvicorn and fastapi. "
+            "Install them before running GUI mode."
+        ) from exc
+
+    interaction_port = HttpBridgeInteractionPort()
+    set_interaction_port(interaction_port)
+
+    server = uvicorn.Server(
+        uvicorn.Config(
+            "psai.app.ui_server:app",
+            host=host,
+            port=int(port),
+            reload=False,
+            log_level="info",
+        )
+    )
+    server_thread = threading.Thread(target=server.run, daemon=True)
+    server_thread.start()
+
+    if not _wait_for_http_ready(f"http://{host}:{int(port)}/state", timeout_seconds=20.0):
+        server.should_exit = True
+        server_thread.join(timeout=5.0)
+        set_interaction_port(None)
+        raise RuntimeError("UI bridge server failed to start for electron-ui mode.")
+
+    electron_process: subprocess.Popen | None = None
+    try:
+        electron_process = _launch_electron_runtime(
+            host=host,
+            port=port,
+        )
+        run_battle(
+            player,
+            mechanics=mechanics,
+            model=None,
+            state_callback=update_state,
+            model_checkpoint_path=model_checkpoint_path,
+            interaction_port=interaction_port,
+        )
+        return 0
+    finally:
+        _stop_process(electron_process)
+        server.should_exit = True
+        server_thread.join(timeout=5.0)
+        set_interaction_port(None)
+
+
+def run_UI_battle(
+    player: Any,
+    *,
+    mechanics: MechanicsAPI,
+    model_checkpoint_path: str | None = None,
+    ui_host: str = "127.0.0.1",
+    ui_port: int = 8000,
+) -> int:
+    return _run_electron_ui_mode(
+        player=player,
+        mechanics=mechanics,
+        model_checkpoint_path=model_checkpoint_path,
+        host=ui_host,
+        port=int(ui_port),
+    )
 
 # ========================================
 # Application Entrypoint
@@ -2267,23 +2533,16 @@ def _load_runtime_model_bonus(
 
 
 def main() -> int:
-
-    # TO RUN (in bash):
-    # cd /home/jeezu/CptS440-PokemonAI/showdownAIproject
-    # source .venv/bin/activate
-    # python3 -m psai.app.main
-
     player = pokeEnvPlayerInfo()
     mechanics = MechanicsAPI()
 
-    # TRAINING CYCLE:
+    # TRAINING CYCLE (active by default):
     # 1. If there are no logs, run heuristic training first to generate initial data.
     # 2. During the heuristic run, log all decisions and outcomes.
     # 3. Train the policy/value model on accumulated logs.
     # 4. Run model-play collection for the configured decision budget.
     # 5. Run evaluation and compare against target winrate.
-
-    training_report = run_training_cycle(
+    '''training_report = run_training_cycle(
         TrainingLoopConfig(
             log_path="training/battle_logs_V2.jsonl",
             artifact_dir="training/artifacts",
@@ -2309,15 +2568,9 @@ def main() -> int:
         mechanics,
     )
     print(f"Training status: {training_report['status']}")
-    
-
-    # Manual runtime (leave commented while training loop is the active path):
-    
-    # state_callback = update_state is where we connect the battle loop to the UI
-    # each turn, the latest State should be passed into update_state, stored in the UI bridge
-    # then the FastAPI /state endpoint will read that latest state and bring the info over to the UI
-    
-    '''run_battle(
+    '''
+    '''
+    run_battle(
         player,
         mechanics=mechanics,
         top_k=3,
@@ -2325,8 +2578,17 @@ def main() -> int:
         max_turns=None,
         wr_log_path="training/player_WR_log.jsonl",
         user_timeout_seconds=60.0,
-        state_callback = update_state
+        model_checkpoint_path="/absolute/path/to/model.pt",
+        interaction_port=ConsoleInteractionPort(),
     )'''
+
+    run_UI_battle(
+        player,
+        mechanics=mechanics,
+        model_checkpoint_path="/absolute/path/to/model.pt",
+        ui_host="127.0.0.1",
+        ui_port=8000,
+    )
 
     return 0
 

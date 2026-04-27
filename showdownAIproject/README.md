@@ -23,6 +23,12 @@ cd FILEPATHTO/showdownAIproject
 source .venv/bin/activate
 pip install -e .   
 python3 -m psai.app.main
+# main.py uses comment/uncomment workflow:
+# - keep run_training_cycle(...) active for training
+# - uncomment run_battle(...) for terminal manual play
+# - uncomment run_UI_battle(...) for Electron UI mode
+#   (UI mode builds frontend bundle and opens Electron directly)
+# - set model_checkpoint_path directly in function call (or None for heuristic-only)
 # ----------------------------------------------
 
 
