@@ -39,7 +39,7 @@ cd filePathTO/CptS440-PokemonAI
 git checkout main
 git status
 git add .
-git commit -m "Rerunning training, but with a fresh log file, to see if it improves performance."
+git commit -m "everything should be done now"
 git push origin main
 git rev-parse --short HEAD
 
