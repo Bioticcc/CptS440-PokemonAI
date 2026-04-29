@@ -1055,7 +1055,8 @@ def _run_manual_connected_battle(
             
             # using this state for ui payloads
             if state_callback is not None:
-                state_callback(state)
+                # add turn suggestions for model reponse
+                state_callback(state, turn_suggestions)
 
             _interaction_emit(interaction_port, _render_ascii_battle_view(state, battle))
             _interaction_emit(interaction_port, "Top model suggestions:")

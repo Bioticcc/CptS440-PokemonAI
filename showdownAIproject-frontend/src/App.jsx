@@ -3,9 +3,6 @@ import { useEffect, useState } from 'react'
 import { fetchBattleState, fetchPrompt, submitPromptResponse } from './uiBridgeApi'
 
 // labeled dynamic data placeholders with TODO
-// note to self: fix resizing using clamp. OR, make the pokedex fill the whole screen.
-// that way it can be more of a "pop up pokedex" which can be a bit like a screen overlay
-// another option is to have the buttons hidden when we minimize
 
 function App() {
   //  DYNAMIC DATA USE STATES
@@ -15,8 +12,25 @@ function App() {
   const [challengeName, setChallengeName] = useState('')
   const [isSubmittingPrompt, setIsSubmittingPrompt] = useState(false)
 
+  // little tool tip to give the user some info
+  const [showToolTip, setShowToolTip] = useState(false)
+
   // for switching pokemon, we need to know our current active pokemon and we hide it as an option
   const activeSpecies = battle?.friendly?.active?.species;
+
+  // for reasons and move suggestions
+  // here we'll just get the best moves in order and map the num of stars
+  const rankedMoves = [...(battle?.legal_actions ?? [])]
+    .sort((a, b) => b.score - a.score)
+
+  const [selectedMove, setSelectedMove] = useState(null)
+  const gridMoves = battle?.legal_actions ?? []
+
+  // the reasons for moves
+  const selectedMoveData = selectedMove
+
+  // turn number
+  const turnNumber = battle?.turn ?? 1
 
   // live polling of battle state + runtime prompts
   useEffect(() => {
@@ -169,6 +183,22 @@ function App() {
       <div className="pokedex-border">
         <div className="pokedex-inner">
 
+          {/* tool tip */}
+          <div
+            className="tooltip-trigger"
+            onMouseEnter={() => setShowToolTip(true)}
+            onMouseLeave={() => setShowToolTip(false)}
+          >
+            ?
+          </div>
+
+          {showToolTip && (
+            <div className="tooltip-popup">
+              Moves are recommended using a star system, with 3 stars being the highest. <br /><br />
+              Click on a move to see our model's reasoning.
+            </div>
+          )}
+
           {/* left panel */}
           <section className="panel panel-left">
 
@@ -201,9 +231,23 @@ function App() {
                 {/* we'll have to add in stars, and the PP also */}
                 <div className="move-grid">
 
-                  {/* mapping our legal actions */}
-                  {battle?.legal_actions?.map((move, i) => (
-                    <div className="move-box" key={i}>
+                  {/* mapping our legal actions - a user will select a move and reasons show on the right later */}
+                  {gridMoves.map((move, i) => (
+                    <div
+                      key={move.action_id}
+                      className="move-box"
+                      onClick={() => {
+                        setSelectedMove(move)
+                      }}
+                      style={{
+                        cursor: 'pointer',
+                        border:
+
+                          selectedMove?.action_id === move.action_id
+                            ? "3px solid #17f944"
+                            : "3px solid #333333"
+                      }}
+                    >
 
                       {/* name of the move*/}
                       <div><b>{move.move_name}</b></div>
@@ -211,8 +255,12 @@ function App() {
                       {/* PP */}
                       <div>PP: {move.current_pp ?? "?"}/{move.max_pp ?? "?"}</div>
 
-                      {/* TODO: stars to indicate the model rating */}
-                      <div>★</div>
+                      {/* stars to indicate the model rating */}
+                      <div>
+                        {move.rank === 1 && "★★★"}
+                        {move.rank === 2 && "★★"}
+                        {move.rank === 3 && "★"}
+                      </div>
 
                     </div>
                   ))}
@@ -230,6 +278,7 @@ function App() {
                   <div className="left-button-rectangle" style={{ backgroundColor: '#ff783d' }} />
                 </div>
 
+                {/* TODO: hook this up with a select move */}
                 <div className="select-button">Select</div>
 
                 {/* d-pad, just two rectangles */}
@@ -257,11 +306,29 @@ function App() {
           <section className="panel panel-right">
             <div className="right-main-rectangle">
 
-              {/* TODO: move reasons */}
+              {/* move reasons */}
               <p className="right-text">
                 <span className="right-text-arrow">&#10148;</span>
-                <strong><u>Reasons:</u></strong> new status bonus: +80.00; move order: +75.00
+                <strong><u>
+                  {selectedMoveData ? selectedMoveData.move_name : ""} Reasons:
+                </u></strong>
               </p>
+
+              {selectedMoveData ? (
+                <ul className="right-sublist">
+                  {/* list of reasons */}
+                  {selectedMoveData.reasons?.length > 0 ? (
+                    selectedMoveData.reasons.map((reason, i) => (
+                      <li key={i}>{reason}</li>
+                    ))
+                  ) : (
+                    <li>No reasoning available.</li>
+                  )}
+                </ul>
+              ) : (
+                // when no move is selected (default)
+                <p className="right-text">Click a move to see its reasoning.</p>
+              )}
 
               {/* opponent info (type, known moves, known switches) */}
               <p className="right-text">
@@ -288,8 +355,7 @@ function App() {
                   <button className="right-blue-button" key={i}>
                     {pokemon.species}
                   </button>
-              ))}
-
+                ))}
 
               {/* 6-10 can hold the stars of how good the switch is, and status of pokemon (fainted? sleep?) */}
               {battle?.friendly?.team
@@ -302,12 +368,12 @@ function App() {
                       {pokemon.fainted ? "fainted" : ""}
                       {pokemon.status ? `${pokemon.status}` : ""}
                       {!pokemon.fainted && !pokemon.status ? "healthy" : ""}
-                    
+
                       {/* TODO: indicate star rating */}
-                      <div>★</div>
+                      {/* <div>★</div> */}
                     </span>
                   </button>
-              ))}
+                ))}
 
             </div>
 
@@ -328,7 +394,9 @@ function App() {
 
             {/* row 3 has two big buttons */}
             <div className="right-row-3">
-              <div className="right-large-rectangle" />
+              <div className="right-large-rectangle">
+                <strong> Turn {battle?.turn ?? "?"}</strong>
+              </div>
               <div className="right-large-rectangle" />
             </div>
 

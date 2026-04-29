@@ -8,7 +8,8 @@ from psai.mechanics.api import ActionOutcome, MechanicsAPI
 from typing import TypedDict, List, Optional
 
 # convert game state and mechanics outputs into JSON for frontend dynamic rendering
-def build_ui_payload(state: State, mechanics: MechanicsAPI) -> dict:
+# suggestions is for the model information!
+def build_ui_payload(state: State, mechanics: MechanicsAPI, suggestions=None) -> dict:
 
     friendly = {
         "active": _pokemon_to_ui(state.friendly_active),
@@ -20,8 +21,14 @@ def build_ui_payload(state: State, mechanics: MechanicsAPI) -> dict:
         "team": [_pokemon_to_ui(p) for p in state.opponent_team],
     }
 
+    # for the model suggestions, map by action id
+    suggestion_map = {
+        s.action.action_id: s for s in (suggestions or [])
+    }
+    
+    # legal actions WITH model suggestions
     legal_actions = [
-        _action_to_ui(state, mechanics, action)
+        _action_to_ui(state, mechanics, action, suggestion_map)
         for action in state.legal_actions
     ]
 
@@ -61,8 +68,9 @@ class ActionUI(TypedDict):
     move_name: str
     is_switch: bool             # whether this action is a switch (vs. a move)
     outcome: ActionOutcomeUI    # calculations
-    # score: float                # model's score for an action
-    # reasons: List[str]          # list of model's reasoning
+    score: float                # model's score for an action
+    rank: Optional[int]         # model's rank for an action
+    reasons: List[str]          # list of model's reasoning
 
 # easier info organization for friendly and opponent 
 class SideUI(TypedDict):
@@ -101,9 +109,10 @@ def _outcome_to_ui(outcome: ActionOutcome) -> ActionOutcomeUI:
         "type_effectiveness": outcome.type_effectiveness,
     }
     
-def _action_to_ui(state: State, mechanics: MechanicsAPI, action: LegalAction) -> ActionUI:
+def _action_to_ui(state: State, mechanics: MechanicsAPI, action: LegalAction, suggestion_map=None) -> ActionUI:
 
     outcome = mechanics.evaluate_action(state, action)
+    suggestion = suggestion_map.get(action.action_id) if suggestion_map else None
 
     return {
         "action_id": action.action_id,
@@ -112,4 +121,9 @@ def _action_to_ui(state: State, mechanics: MechanicsAPI, action: LegalAction) ->
         "current_pp": action.current_pp,
         "max_pp": action.max_pp,
         "outcome": _outcome_to_ui(outcome),
+        
+        # onto the actual model suggestions info!
+        "score": suggestion.score if suggestion else 0.0,
+        "rank": suggestion.rank if suggestion else None,
+        "reasons": suggestion.reasons if suggestion else [],
     }

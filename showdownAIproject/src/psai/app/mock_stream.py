@@ -5,19 +5,24 @@ Mock battle-state generator for UI testing
 Simulates a live battle state without requiring a real
 poke-env connection or trained agent
 """
-
-# Plain-English summary:
-# This file replicates a fake live battle so we can test the UI and backend
-# without running the actual game engine or model
-
 import time
 import json
 
 from psai.domain.state import State, PokemonSnapshot, LegalAction
 from psai.app.ui_payload import build_ui_payload
 from psai.mechanics.api import MechanicsAPI
+from psai.app.ui_bridge import update_state, update_suggestions
+from dataclasses import dataclass
 
-
+# rebuilding the MoveSuggestion class
+@dataclass
+class MoveSuggestion:
+    rank: int
+    action: LegalAction
+    score: float
+    reasons: list[str]
+    breakdown: dict[str, float]
+    
 # creating some fake data for testing
 # didn't want to mess with the real battle engine since we're still training
 # so this file is to make sure our payloads are working correctly and we can stream data through the API
@@ -25,7 +30,6 @@ from psai.mechanics.api import MechanicsAPI
 
 def make_mock_state(turn: int) -> State:
     
-    # our team (just pikachu)
     # --- [ OUR TEAM! ] ---
     pikachu = PokemonSnapshot(
         species="pikachu",
@@ -33,7 +37,7 @@ def make_mock_state(turn: int) -> State:
         status=None,
         boosts={},
         types=("electric",),
-        known_moves=("thunderbolt", "quick_attack", "growl", "spark"),
+        known_moves=("thunderbolt", "quick_attack", "growl", "spark",),
         fainted=False,
     )
     
@@ -43,7 +47,7 @@ def make_mock_state(turn: int) -> State:
         status=None,
         boosts={},
         types=("grass",),
-        known_moves=("vine_whip"),
+        known_moves=("vine_whip",),
         fainted=True,
     )
     
@@ -53,7 +57,7 @@ def make_mock_state(turn: int) -> State:
         status="paralyzed",
         boosts={},
         types=("water",),
-        known_moves=("water_gun"),
+        known_moves=("water_gun",),
         fainted=False,
     )
     
@@ -63,7 +67,7 @@ def make_mock_state(turn: int) -> State:
         status="burned",
         boosts={},
         types=("fire", "flying"),
-        known_moves=("flamethrower"),
+        known_moves=("flamethrower",),
         fainted=False,
     )
     
@@ -73,7 +77,7 @@ def make_mock_state(turn: int) -> State:
         status="asleep",
         boosts={},
         types=("normal", "flying"),
-        known_moves=("gust"),
+        known_moves=("gust",),
         fainted=False,
     )
 
@@ -83,7 +87,7 @@ def make_mock_state(turn: int) -> State:
         status=None,
         boosts={},
         types=("normal",),
-        known_moves=("tackle"),
+        known_moves=("tackle",),
         fainted=False,
     )
     
@@ -168,25 +172,78 @@ def make_mock_state(turn: int) -> State:
         legal_actions=(thunderbolt, quick_attack, growl, spark),
         raw_battle=None,
     )
+    
 
+# based off the screenshots sent to group, created mock suggestions
+def make_mock_suggestions(state: State):
+    actions = list(state.legal_actions)
 
+    return [
+        MoveSuggestion(
+            rank=1,
+            action=actions[0],
+            score=215.00,
+            
+            # reasons just a prettier version of breakdown
+            reasons=[
+                "new status bonus: +80.00",
+                "move order: +75.00",
+                "type effectiveness: +60.00",
+            ],
+            
+            # wasnt 100% how to format the breakdown so i made it similar to reasons?
+            breakdown={
+                "status": 80.0,
+                "move_order": 75.0,
+                "type_effectiveness": 60.0
+            },
+        ),
+        
+        MoveSuggestion(
+            rank=2,
+            action=actions[1],
+            score=150.00,
+            reasons=[
+                "new status bonus: +80.00",
+                "move order: +75.00",
+                "type effectiveness: +60.00",
+            ],
+            breakdown={
+                "status": 50.0,
+                "move_order": 75.0,
+                "type_effectiveness": 60.0
+            },
+        ),
+        
+        # pretend this is a switch
+        MoveSuggestion(
+            rank=3,
+            action=actions[2],
+            score=0.63,
+            reasons=[
+                "move_order: +75.00",
+                "switch penalty: -50.00",
+            ],
+            breakdown={
+                "move_order": 75.0,
+                "switch_penalty": -50.0,
+            },
+        ),
+    ]
+
+# testing using the UI bridge
 def run_mock_stream():
     mechanics = MechanicsAPI()
-
-    # starting turn
     turn = 1
 
     while True:
         state = make_mock_state(turn)
-        payload = build_ui_payload(state, mechanics)
+        suggestions = make_mock_suggestions(state)
+        update_state(state)
+        update_suggestions(suggestions)
 
-        print("\n--- [ UI PAYLOAD (MOCK STREAM) ] ---")
-        print(json.dumps(payload, indent=2))
-
-        # every two seconds we update our state
         time.sleep(2)
         turn += 1
-
 
 # for testing purposes, you can keep running this mock_stream along with ui_server.py
 # shows the connection between the mock stream and the online api endpoint

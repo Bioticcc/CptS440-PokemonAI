@@ -8,9 +8,13 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from psai.app.ui_bridge import get_interaction_port, get_state
+from psai.app.ui_bridge import get_interaction_port, get_state, get_suggestions
 from psai.app.ui_payload import build_ui_payload
 from psai.mechanics.api import MechanicsAPI
+
+# these are for testing via mock stream while we finish up the last training.
+# import threading
+# from psai.app.mock_stream import run_mock_stream
 
 app = FastAPI()
 mechanics = MechanicsAPI()
@@ -35,7 +39,9 @@ def get_state_endpoint() -> dict[str, Any]:
     state = get_state()
     if state is None:
         return {"battle_tag": "no_battle"}
-    return build_ui_payload(state, mechanics)
+    
+    suggestions = get_suggestions()
+    return build_ui_payload(state, mechanics, suggestions)
 
 
 @app.get("/ui/prompt")
@@ -70,3 +76,10 @@ def get_ui_logs_endpoint(since: int = Query(default=0, ge=0)) -> dict[str, Any]:
     if interaction_port is None or not hasattr(interaction_port, "get_logs_since"):
         return {"cursor": int(since), "items": []}
     return interaction_port.get_logs_since(int(since))
+
+
+# this was also for testing the mock stream - can delete later once we finish coding
+# @app.on_event("startup")
+# def start_mock_stream():
+#     thread = threading.Thread(target=run_mock_stream, daemon=True)
+#     thread.start()
