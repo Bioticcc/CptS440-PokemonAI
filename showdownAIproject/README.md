@@ -1,7 +1,11 @@
-
 # ----------------------------------------------
-# Alright, first and foremost we need to confirm weve got the required installs ready:
-## Run the following in your VS code bash terminal:
+## install the repo to your computer
+- git clone https://github.com/Bioticcc/CptS440-PokemonAI.git
+
+## (LATER)
+- download our apk/other install thing to install the app fully
+
+## run these in bash
 - python3 --version
     - If this gives an error, run: sudo apt update sudo apt install -y python3 python3-venv python3-pip
 - git --version
@@ -13,7 +17,13 @@
 ## run these in (.venv) 
 - python -m pip install --upgrade pip wheel setuptools
 - pip install -e . 
-    - This now installs the key runtime deps from `pyproject.toml`, including `poke-env` and `torch`.
+
+## run these in venv for UI stuff
+- sudo apt update
+- sudo apt install -y nodejs npm
+- cd /home/biotic/CptS440-PokemonAI/showdownAIproject-frontend
+- npm install
+- npm install -D electron
 # ----------------------------------------------
 
 
@@ -39,7 +49,7 @@ cd filePathTO/CptS440-PokemonAI
 git checkout main
 git status
 git add .
-git commit -m "everything should be done now"
+git commit -m "still gotta add final touches to UI. Do on other laptop"
 git push origin main
 git rev-parse --short HEAD
 
@@ -160,6 +170,8 @@ So our "pipeline" is as such:
 8. confirmed move is passed back to the poke-env agent
 9. poke-env sends that move to showdown
 
+
+# DELETE EVERYTHING BELOW THIS
 
 ## TRAINING CYCLE STABILITY NOTE 
 - Current status: the training cycle is actively working in long ladder runs.

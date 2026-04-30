@@ -2636,7 +2636,7 @@ def main() -> int:
     run_UI_battle(
         player,
         mechanics=mechanics,
-        model_checkpoint_path="/absolute/path/to/model.pt",
+        model_checkpoint_path="training/artifacts/checkpoints/current_champion.pt",
         ui_host="127.0.0.1",
         ui_port=8000,
     )

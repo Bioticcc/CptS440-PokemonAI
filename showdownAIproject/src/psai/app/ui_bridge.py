@@ -11,9 +11,10 @@ _latest_suggestions: Any | None = None
 _active_interaction_port: Any | None = None
 
 
-def update_state(state: State) -> None:
-    global _latest_state
+def update_state(state: State, suggestions: Any | None = None) -> None:
+    global _latest_state, _latest_suggestions
     _latest_state = state
+    _latest_suggestions = suggestions
 
 
 def get_state() -> Optional[State]:
