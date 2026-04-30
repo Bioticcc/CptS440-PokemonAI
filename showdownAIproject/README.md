@@ -49,7 +49,7 @@ cd filePathTO/CptS440-PokemonAI
 git checkout main
 git status
 git add .
-git commit -m "still gotta add final touches to UI. Do on other laptop"
+git commit -m "DEMO READY (I think)"
 git push origin main
 git rev-parse --short HEAD
 

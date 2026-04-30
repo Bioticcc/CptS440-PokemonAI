@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import select
+import signal
 import shutil
 import subprocess
 import sys
@@ -732,26 +733,29 @@ def _prompt_user_choice_for_request(
             _interaction_emit(interaction_port, "[manual] no user selection within 60 seconds. Auto-selecting #1 ranked move.")
             return auto_order, auto_action_id
 
-        mode_choice = _interaction_prompt(
-            interaction_port,
-            kind="battle_mode",
-            message=f"Choose 1, 2, or 3 ({int(max(1, remaining))}s left): ",
-            options=[
-                {"id": "1", "label": "Attack"},
-                {"id": "2", "label": "Switch"},
-                {"id": "3", "label": "Forfeit"},
-            ],
-            timeout_seconds=min(remaining, 20.0),
-            metadata={
-                "battle_tag": str(getattr(battle, "battle_tag", "") or ""),
-                "turn": int(getattr(state, "turn_number", 0) or 0),
-            },
-        )
-        if mode_choice is None:
-            continue
-        if mode_choice not in {"1", "2", "3"}:
-            _interaction_emit(interaction_port, "[manual] invalid choice; please enter 1, 2, or 3.")
-            continue
+        if not available_moves and available_switches:
+            mode_choice = "2"
+        else:
+            mode_choice = _interaction_prompt(
+                interaction_port,
+                kind="battle_mode",
+                message=f"Choose 1, 2, or 3 ({int(max(1, remaining))}s left): ",
+                options=[
+                    {"id": "1", "label": "Attack"},
+                    {"id": "2", "label": "Switch"},
+                    {"id": "3", "label": "Forfeit"},
+                ],
+                timeout_seconds=min(remaining, 20.0),
+                metadata={
+                    "battle_tag": str(getattr(battle, "battle_tag", "") or ""),
+                    "turn": int(getattr(state, "turn_number", 0) or 0),
+                },
+            )
+            if mode_choice is None:
+                continue
+            if mode_choice not in {"1", "2", "3"}:
+                _interaction_emit(interaction_port, "[manual] invalid choice; please enter 1, 2, or 3.")
+                continue
 
         if mode_choice == "3":
             remaining = deadline - time.time()
@@ -901,7 +905,7 @@ def _print_player_wr_summary(
     interaction_port: ManualInteractionPort | None = None,
 ) -> None:
     if not path.exists():
-        _interaction_emit(interaction_port, "No all-time winrate records yet.")
+        _interaction_emit(interaction_port, "No games played yet.")
         return
 
     wins = 0
@@ -925,6 +929,10 @@ def _print_player_wr_summary(
                 losses += 1
             else:
                 ties += 1
+
+    if total <= 0:
+        _interaction_emit(interaction_port, "No games played yet.")
+        return
 
     wr = (wins / (wins + losses)) if (wins + losses) > 0 else 0.0
     _interaction_emit(interaction_port, "All-time Battle Record")
@@ -1491,13 +1499,16 @@ def run_battle(
                 resolved_interaction_port,
                 kind="challenge_username",
                 message="Enter player name to challenge: ",
+                options=[
+                    {"id": "back", "label": "Back to main menu"},
+                ],
                 timeout_seconds=None,
                 allow_text=True,
             )
             if opponent_name is not None:
                 opponent_name = str(opponent_name).strip()
-            if not opponent_name:
-                _interaction_emit(resolved_interaction_port, "[manual] challenge cancelled: no opponent entered.")
+            if not opponent_name or str(opponent_name).strip().lower() in {"back", "cancel"}:
+                _interaction_emit(resolved_interaction_port, "[manual] challenge cancelled. Returning to menu.")
                 continue
             _safe_reset_battles(player)
             _interaction_emit(resolved_interaction_port, f"[manual] sending challenge to {opponent_name}...")
@@ -2482,6 +2493,7 @@ def _launch_electron_runtime(
         cwd=frontend_root,
         env=env,
         text=True,
+        start_new_session=True,
     )
 
     return electron_process
@@ -2492,11 +2504,26 @@ def _stop_process(process: subprocess.Popen | None) -> None:
         return
     if process.poll() is not None:
         return
-    process.terminate()
+
+    terminated = False
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        terminated = True
+    except Exception:
+        pass
+    if not terminated:
+        process.terminate()
     try:
         process.wait(timeout=5.0)
     except Exception:
-        process.kill()
+        killed = False
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+            killed = True
+        except Exception:
+            pass
+        if not killed:
+            process.kill()
         try:
             process.wait(timeout=2.0)
         except Exception:

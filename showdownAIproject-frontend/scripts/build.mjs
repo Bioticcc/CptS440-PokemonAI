@@ -22,6 +22,10 @@ await build({
   outfile: appJsPath,
   minify: true,
   sourcemap: false,
+  loader: {
+    '.jpg': 'file',
+    '.jpeg': 'file',
+  },
   define: {
     __PSAI_BACKEND_ORIGIN__: JSON.stringify(backendOrigin),
   },
